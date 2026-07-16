@@ -16,9 +16,9 @@ on:
         options:
           - 'v24.x'       # LTS (Krypton) — recommended for stability
           - 'v26.x'       # Latest release line
-          - 'custom'      # use custom_ref below (any tag/branch, e.g. v24.5.0, v27.x)
+          - 'custom'      # use custom_ref below (any tag/branch, e.g. v24.18.0)
       custom_ref:
-        description: 'Custom git ref — only used when "custom" is selected (e.g. v24.5.0)'
+        description: 'Custom git ref — only used when "custom" is selected'
         required: false
         default: ''
       lib_name:
@@ -35,9 +35,9 @@ on:
           - 'size'        # + v8-lite-mode: much lower RAM usage, but slower JS/crypto
 
 env:
-  NDK_VERSION: 'r27c'          # NDK r27c (Clang 18). r28+ only needed for API-36 headers.
-  MIN_API: '21'                # minSdk 21 = Android 5.0 (== CMake's -DANDROID_PLATFORM=android-21)
-  ANDROID_PLATFORM: 'android-21'
+  NDK_VERSION: 'r27c'          # NDK r27c (Clang 18)
+  MIN_API: '24'                # Node v24+ officially requires API 24+ (Android 7.0). Do NOT set below 24.
+  ANDROID_PLATFORM: 'android-24'
 
 jobs:
   build:
@@ -60,13 +60,11 @@ jobs:
       # ---------- 0. Resolve inputs (version + library name) ----------
       - name: Resolve inputs
         run: |
-          # --- Node.js ref ---
           REQ="${{ inputs.node_version || 'v24.x' }}"
           if [ "$REQ" = "custom" ]; then REQ="${{ inputs.custom_ref }}"; fi
           test -n "$REQ" || { echo "::error::custom_ref is empty"; exit 1; }
           echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
 
-          # --- Library name: accept "aurora", "libaurora" or "libaurora.so" ---
           NAME="${{ inputs.lib_name || 'node' }}"
           NAME="${NAME#lib}"      # strip leading "lib" if present
           NAME="${NAME%.so}"      # strip trailing ".so" if present
@@ -75,7 +73,6 @@ jobs:
             exit 1
           fi
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
-
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
       # ---------- 1. Android NDK ----------
@@ -99,7 +96,7 @@ jobs:
             python3 g++ make git ca-certificates patchelf
 
       # ---------- 3. Node.js source ----------
-      - name: Clone Node.js ($NODE_REF)
+      - name: Clone Node.js (${{ env.NODE_REF }})
         run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
 
       # ---------- 4. Cross-compile ----------
@@ -109,8 +106,8 @@ jobs:
           export TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$TC/bin:$PATH"
 
-          # The "21" suffix selects the API level (NDK equivalent of
-          # -DANDROID_PLATFORM=android-21).
+          # The API-level suffix (24) selects the platform — NDK equivalent of
+          # CMake's -DANDROID_PLATFORM=android-24.
           export CC="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           export CXX="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
           export AR="$TC/bin/llvm-ar"
@@ -120,7 +117,9 @@ jobs:
           export READELF="$TC/bin/llvm-readelf"
           export LINK="$CXX"
 
-          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }}"
+          # These GYP_DEFINES mirror Node's official android-configure script.
+          # android_ndk_path is REQUIRED — node.gyp fails without it.
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME}"
 
           # 16 KB alignment → keeps working on Android 15/16 (API 35/36) 16 KB-page devices
           export LDFLAGS="-Wl,-z,max-page-size=16384"
@@ -132,6 +131,8 @@ jobs:
             size)  EXTRA_FLAGS="--v8-lite-mode" ;;
           esac
 
+          # NOTE: no --without-snapshot — modern Node forbids it, and cross-builds
+          # generate snapshots via host tools. Keeping snapshots = faster startup.
           ./configure \
             --cross-compiling \
             --dest-os=android \
@@ -141,8 +142,6 @@ jobs:
             --without-npm \
             --without-corepack \
             --openssl-no-asm \
-            --without-snapshot \
-            --without-node-snapshot \
             $EXTRA_FLAGS
 
           make -j"$(nproc)"
@@ -162,9 +161,7 @@ jobs:
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
           "$TC/bin/llvm-strip" --strip-all node
 
-          # Make the rename real, not just cosmetic:
-          #  - set the library's SONAME to the new name
-          #  - point the node CLI binary at the new name (its DT_NEEDED says libnode.so)
+          # Make the rename real: fix SONAME + the node binary's DT_NEEDED entry
           if [ "$LIB_NAME" != "node" ]; then
             patchelf --set-soname "$LIB" "$LIB"
             patchelf --replace-needed libnode.so "$LIB" node
@@ -188,3 +185,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          
