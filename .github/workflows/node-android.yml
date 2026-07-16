@@ -1,6 +1,6 @@
 # .github/workflows/node-android.yml
 # Cross-compiles Node.js for Android: arm64-v8a (verified) + armeabi-v7a (experimental,
-# see nodejs/node#58975). Produces per ABI: lib<name>.so + node CLI binary.
+# see nodejs/node#58975). Produces per ABI: lib<n>.so + node CLI binary.
 name: Node.js for Android (ARM)
 
 on:
@@ -22,7 +22,7 @@ on:
         required: false
         default: ''
       lib_name:
-        description: 'Library name — output will be lib<name>.so (e.g. "aurora" → libaurora.so)'
+        description: 'Library name — output will be lib<n>.so (e.g. "aurora" → libaurora.so)'
         required: false
         default: 'node'
       profile:
@@ -105,12 +105,17 @@ jobs:
       - name: Clone Node.js (${{ env.NODE_REF }})
         run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
 
-      # ---------- 3b. Patch known Android cross-build issues (nodejs/node#58975) ----------
+      # ---------- 3b. Patch known Android cross-build issues ----------
+      # Android is not an officially tested/supported Node.js target (core team
+      # position, see nodejs/node#58505) — these are community-tracked issues
+      # carried by Termux's Node.js packaging for years and partially upstreamed.
+      # Expect this list to need revisiting on every Node major bump.
       - name: Patch V8 for Android cross-build
         working-directory: node
         run: |
           python3 - <<'PYEOF'
           import pathlib
+          import textwrap
 
           def patch(path, old, new):
               p = pathlib.Path(path)
@@ -123,6 +128,9 @@ jobs:
 
           # Bionic ships <execinfo.h> but declares backtrace*() only for API 33+.
           # If this file is ever compiled by the NDK clang, provide no-op stubs.
+          # Confirmed still live on Node 22+/NDK r27 in nodejs/node#58505 (same
+          # three undeclared identifiers: backtrace, backtrace_symbols,
+          # backtrace_symbols_fd, in this exact file).
           patch('deps/v8/src/base/debug/stack_trace_posix.cc',
                 '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"',
                 '#if defined(__ANDROID__)\n'
@@ -136,7 +144,199 @@ jobs:
           patch('deps/v8/src/base/small-vector.h',
                 '  ASSERT_TRIVIALLY_COPYABLE(T);',
                 '  // ASSERT_TRIVIALLY_COPYABLE(T);  // android xbuild: nodejs/node#58975')
+
+          # FIX for: undefined symbol v8_internal_simulator_ProbeMemory /
+          # trap_handler::RegisterDefaultTrapHandler / TryHandleSignal at the
+          # mksnapshot link step (root cause: deps/v8/src/trap-handler/trap-handler.h
+          # decides V8_TRAP_HANDLER_SUPPORTED per V8_HOST_ARCH/V8_TARGET_ARCH/V8_OS
+          # combination; the ARM64-target-simulated-on-x64-Linux-host branch says
+          # "supported", but Node's gyp port of V8's build never compiles the
+          # matching trap-handler/simulator objects for the .host toolset — see
+          # nodejs/node#36287, where the original reporter traced this to the exact
+          # same host-toolset object selection gap).
+          #
+          # Node.js ships an official patch for this at android-patches/trap-handler.h.patch
+          # in THIS checkout (applied automatically by ./android-configure, which this
+          # workflow does not use — it calls ./configure directly). That in-tree patch
+          # is a hunk against a moving upstream file, so it goes stale across Node refs
+          # (nodejs/node#60369 documents prior staleness) and this workflow has no way to
+          # fetch a version pinned to whatever ref the user picks in node_version/custom_ref.
+          #
+          # Use Termux's nodejs-lts patch instead (github.com/termux/termux-packages,
+          # packages/nodejs-lts/deps-v8-src-trap-handler-trap-handler.h.patch, fetched and
+          # reviewed on 2026-07-17): it deletes the whole V8_HOST_ARCH/V8_TARGET_ARCH/V8_OS
+          # gating table and hardcodes V8_TRAP_HANDLER_SUPPORTED=false, so there's no
+          # per-arch branch left to go stale — it can't apply-fail the way an in-tree hunk
+          # can, at the cost of losing V8's signal-based OOB-trap fast path for WASM (same
+          # tradeoff as the v8_enable_webassembly=false fallback already noted below; this
+          # is strictly narrower since only the trap-handler fast path is dropped, not all
+          # of WASM). Applied as an in-tree patch to keep this step's failure mode identical
+          # to the block above (::warning on missing context) rather than a hard build stop:
+          patch('deps/v8/src/trap-handler/trap-handler.h',
+                textwrap.dedent('''\
+                    // X64 on Linux, Windows, MacOS, FreeBSD.
+                    #if V8_HOST_ARCH_X64 && V8_TARGET_ARCH_X64 &&                        \\
+                        ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN || \\
+                         V8_OS_FREEBSD)
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // Arm64 (non-simulator) on Linux, Windows, MacOS.
+                    #elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_ARM64 && \\
+                        ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN)
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // Arm64 simulator on x64 on Linux, Mac, or Windows.
+                    //
+                    // The simulator case uses some inline assembly code, which cannot be
+                    // compiled with MSVC, so don't enable the trap handler in that case.
+                    // (MSVC #defines _MSC_VER, but so does Clang when targeting Windows, hence
+                    // the check for __clang__.)
+                    #elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_X64 && \\
+                        (V8_OS_LINUX || V8_OS_DARWIN || V8_OS_WIN) && \\
+                        (!defined(_MSC_VER) || defined(__clang__))
+                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // Loong64 (non-simulator) on Linux.
+                    #elif V8_TARGET_ARCH_LOONG64 && V8_HOST_ARCH_LOONG64 && V8_OS_LINUX
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // Loong64 simulator on x64 on Linux
+                    #elif V8_TARGET_ARCH_LOONG64 && V8_HOST_ARCH_X64 && V8_OS_LINUX
+                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // RISCV64 (non-simulator) on Linux.
+                    #elif V8_TARGET_ARCH_RISCV64 && V8_HOST_ARCH_RISCV64 && V8_OS_LINUX && \\
+                        !V8_OS_ANDROID
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // RISCV64 simulator on x64 on Linux
+                    #elif V8_TARGET_ARCH_RISCV64 && V8_HOST_ARCH_X64 && V8_OS_LINUX
+                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
+                    #define V8_TRAP_HANDLER_SUPPORTED true
+                    // Everything else is unsupported.
+                    #else
+                    #define V8_TRAP_HANDLER_SUPPORTED false
+                    #endif'''),
+                '#define V8_TRAP_HANDLER_SUPPORTED false')
+
+          # FIX for: libuv's main 'libuv' gyp target uses a bare 'include_dirs' key
+          # (no '+'), which replaces gyp's default include path list for that target
+          # instead of appending to it — this can drop NDK/bionic-relevant search
+          # paths that upstream's OS=="linux" defaults would normally supply. Verified
+          # against a fresh nodejs/node v24.x clone (2026-07-17): this exact 6-line
+          # block (target_name/toolsets/type/include_dirs) is present verbatim and
+          # unique in deps/uv/uv.gyp. Source: Termux's nodejs-lts packaging
+          # (packages/nodejs-lts/deps-uv-uv.gyp.patch); NOT Termux-runtime-specific
+          # (unlike several sibling patches in that same directory that hardcode a
+          # Termux install prefix — those are skipped, see the summary at the end of
+          # this step). Note: the patch file's own diff context predates libuv's
+          # 'toolsets': ['host', 'target'] line that now sits between target_name and
+          # type in current Node refs — included below since a strict copy of the old
+          # patch's context would silently no-op against this file:
+          patch('deps/uv/uv.gyp',
+                '\n'.join([
+                    "      'target_name': 'libuv',",
+                    "      'toolsets': ['host', 'target'],",
+                    "      'type': '<(uv_library)',",
+                    "      'include_dirs': [",
+                    "        'include',",
+                    "        'src/',",
+                    "      ],",
+                ]),
+                '\n'.join([
+                    "      'target_name': 'libuv',",
+                    "      'toolsets': ['host', 'target'],",
+                    "      'type': '<(uv_library)',",
+                    "      'include_dirs+': [",
+                    "        'include',",
+                    "        'src/',",
+                    "      ],",
+                ]))
+          # Same issue, second occurrence: the 'include' dir under
+          # direct_dependent_settings (consumed by anything that depends on the
+          # libuv target) is also a bare 'include_dirs' key. Verified unique in the
+          # same v24.x clone:
+          patch('deps/uv/uv.gyp',
+                "        'include_dirs': [ 'include' ],",
+                "        'include_dirs+': [ 'include' ],")
+          # NOTE: Termux's deps-uv-uv.gyp.patch has a third hunk adding a
+          # ['defines': ['__USE_GNU']] entry to the OS=="android" link_settings
+          # block, aimed at a version of this file where that block's source list
+          # was an inline ['src/unix/random-sysctl-linux.c', 'src/unix/epoll.c']
+          # pair lacking '_GNU_SOURCE'. Checked against the same v24.x clone: that
+          # inline list no longer exists (libuv now uses a named
+          # '<@(uv_sources_android)' array), and the surrounding OS=="android" block
+          # already sets 'defines': ['_GNU_SOURCE'] — which itself implies
+          # __USE_GNU in glibc/bionic headers — so the underlying gap this hunk
+          # patched has already been closed upstream. Deliberately not carried
+          # forward; applying it as string-replacement would just no-op (::warning)
+          # against current Node refs, and it wouldn't help older refs either since
+          # _GNU_SOURCE already covers the same need.
+
+          # FIX for: uv_fs_copyfile can hang or misbehave at runtime on-device.
+          # FICLONE/FICLONE_FORCE are reflink ioctls that the NDK's bionic headers
+          # define (so the #ifdef FICLONE guard in deps/uv/src/unix/fs.c compiles
+          # cleanly), but the ioctl itself is unimplemented on most Android
+          # filesystem drivers (ext4/f2fs configs vary by OEM/kernel). This is a
+          # runtime correctness issue, not a build failure, so it won't surface in
+          # this CI job — only later, in whatever app embeds lib${LIB_NAME}.so and
+          # calls fs.copyFile/cp. Guard it out at compile time so unix/fs.c never
+          # attempts the ioctl on Android in the first place. Source: Termux's
+          # nodejs-lts packaging (packages/nodejs-lts/avoid-ficlone-ioctl.patch,
+          # fetched and reviewed 2026-07-17); this one is a straight #ifndef
+          # __ANDROID__ guard, not Termux-prefix-specific, so it applies as-is:
+          patch('deps/uv/src/unix/fs.c',
+                textwrap.dedent("""\
+                    #ifdef FICLONE
+                      if (req->flags & UV_FS_COPYFILE_FICLONE ||
+                          req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {"""),
+                textwrap.dedent("""\
+                    #ifndef __ANDROID__
+                    #ifdef FICLONE
+                      if (req->flags & UV_FS_COPYFILE_FICLONE ||
+                          req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {"""))
+
+          # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
+          # matching #endif before the existing #endif that closes the #ifdef FICLONE
+          # block. Run as a second, explicit pass (not folded into the patch() call
+          # above) because the insertion point is identified by different surrounding
+          # context than the opening edit, and doing it as one replace() would require
+          # matching a very long span between the two edit points for uniqueness.
+          fs_c = pathlib.Path('deps/uv/src/unix/fs.c')
+          s = fs_c.read_text()
+          old_close = '\n'.join([
+              '    goto out;',
+              '  }',
+              '#endif',
+              '',
+              '  bytes_to_send = src_statsbuf.st_size;',
+          ])
+          new_close = '\n'.join([
+              '    goto out;',
+              '  }',
+              '#endif',
+              '#endif',
+              '',
+              '  bytes_to_send = src_statsbuf.st_size;',
+          ])
+          if old_close not in s:
+              print("::warning::context not found for FICLONE #endif close in deps/uv/src/unix/fs.c (maybe already fixed upstream, or the #ifdef FICLONE opening patch above didn't apply — check for a mismatched #ifndef/#endif pair before the build step)")
+          else:
+              fs_c.write_text(s.replace(old_close, new_close, 1))
+              print("closed #ifndef __ANDROID__ block in deps/uv/src/unix/fs.c")
           PYEOF
+
+          echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
+          echo "  - common.gypi.patch: removes an OS==\"android\" cflags/ldflags stanza tied to"
+          echo "    Termux's own android_ndk_path/cpufeatures usage. This is NOT the fix for the"
+          echo "    -m32/-m64 host-cflags collision noted in the cross-compile step below --"
+          echo "    reviewed 2026-07-17 and found unrelated to that issue; if that collision is"
+          echo "    hit on the armeabi-v7a leg, look elsewhere (see the comment at that step)."
+          echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
+          echo "    swap /data/local/tmp for a literal @TERMUX_PREFIX@/tmp placeholder. Not"
+          echo "    applicable outside Termux's own install layout; /data/local/tmp is correct here."
+          echo "  - deps-uvwasi-src-uvwasi.c.patch: re-enables WASI readdir support on Android,"
+          echo "    relying on Termux's libc environment for the underlying dirent API. Unverified"
+          echo "    against a bare NDK build and not exercised by this project's workloads."
+          echo "  - deps-uv-src-unix-process.c.patch: strips post-fork setuid/setgid/setgroups"
+          echo "    privilege-drop calls for Termux's unprivileged userland. Not a cross-compile"
+          echo "    concern and not applicable here."
 
       # ---------- 4. Cross-compile ----------
       - name: Cross-compile Node.js for ${{ matrix.abi }}
@@ -164,10 +364,47 @@ jobs:
           # V8 requires 32-bit host tools for 32-bit targets
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
             export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
+            # KNOWN ISSUE (armeabi-v7a only, unconfirmed against this exact repro):
+            # common.gypi unconditionally adds -m64 to host cflags/ldflags when
+            # host_arch=="x64" (which GH Actions runners auto-detect as, regardless
+            # of dest_cpu). Combined with the -m32 above, host tools may see both
+            # -m32 and -m64 on the same command line. Documented by the same
+            # engineer who maintains Termux's Node.js build, in the nodejs/node#57748
+            # PR description; a common.gypi.patch / v8.gyp.patch pair exists in
+            # Termux's packaging (github.com/termux/termux-packages, packages/nodejs-lts)
+            # to make cross-compiling for 32-bit not add -m64 to the host build, but
+            # neither patch is merged upstream as of this writing — fetch and review
+            # them directly from that repo before adopting, rather than trusting a
+            # hand-copied version here. armeabi-v7a is experimental/continue-on-error
+            # in this workflow already, so this is a "watch for" note, not a blocker.
+            #
+            # SEPARATE KNOWN ISSUE (also arm/32-bit specific): nodejs/node#58975,
+            # "Incorrect selection of x64 push_registers_asm.cc for host build when
+            # target is arm" — a gyp source-file-selection bug for the conservative-
+            # stack-scanning helper, distinct from the trap-handler fix below. Closed
+            # via nodejs/node#57748 but, per that PR's own description, not a complete
+            # fix. If the arm (32-bit) leg fails on an undefined push_registers_asm-
+            # related symbol specifically, that issue thread is the place to look.
           fi
 
           # android_ndk_path is REQUIRED (node.gyp fails without it)
-          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME}"
+          #
+          # host_arch/v8_host_arch=x64: defensive gyp hygiene, not a confirmed fix
+          # by itself. common.gypi keys its host -m64 cflag/ldflag on host_arch=="x64"
+          # explicitly (see common.gypi ~line 536), so pinning it removes ambiguity
+          # about what the host toolset resolves to. It does NOT appear to be the
+          # actual cause of the mksnapshot undefined-symbol error seen in this repo's
+          # CI run — that is a trap-handler.h source-selection issue, fixed by the
+          # patch step above (nodejs/node#36287). Kept here as harmless hardening.
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=x64 v8_host_arch=x64"
+
+          # LAST-RESORT FALLBACK (only if trap-handler.h.patch above does not clear
+          # the mksnapshot link error — e.g. the patch went stale for this Node
+          # version, per the staleness history in nodejs/node#60369): forcibly drops
+          # the trap-handler/simulator-probe symbols from the link graph instead of
+          # fixing the source. Costs WASM OOB-trap fast paths in the resulting
+          # libnode.so; leave commented unless the patch step above proves insufficient.
+          # export GYP_DEFINES="$GYP_DEFINES v8_enable_webassembly=false"
 
           # 16 KB page alignment for Android 15/16 devices
           export LDFLAGS="-Wl,-z,max-page-size=16384"
@@ -227,4 +464,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
-          
