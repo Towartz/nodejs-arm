@@ -1,12 +1,12 @@
 # .github/workflows/node-android.yml
-# Cross-compiles Node.js for Android: armeabi-v7a (32-bit) + arm64-v8a (64-bit)
-# Produces per ABI: lib<name>.so (custom name, for embedding) + node CLI binary.
+# Cross-compiles Node.js for Android: arm64-v8a (verified) + armeabi-v7a (experimental,
+# see nodejs/node#58975). Produces per ABI: lib<name>.so + node CLI binary.
 name: Node.js for Android (ARM)
 
 on:
   push:
     branches: [main]
-    tags: ['v*']            # pushing a tag (e.g. v1.0.0) also attaches builds to a Release
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       node_version:
@@ -14,9 +14,9 @@ on:
         type: choice
         default: 'v24.x'
         options:
-          - 'v24.x'       # LTS (Krypton) — recommended for stability
+          - 'v24.x'       # LTS (Krypton)
           - 'v26.x'       # Latest release line
-          - 'custom'      # use custom_ref below (any tag/branch, e.g. v24.18.0)
+          - 'custom'
       custom_ref:
         description: 'Custom git ref — only used when "custom" is selected'
         required: false
@@ -30,34 +30,38 @@ on:
         type: choice
         default: 'balanced'
         options:
-          - 'balanced'    # JIT + -O3: best runtime speed (best for Baileys/server use)
-          - 'speed'       # + LTO: ~5–15% faster, but build takes much longer
-          - 'size'        # + v8-lite-mode: much lower RAM usage, but slower JS/crypto
+          - 'balanced'    # JIT + -O3: best runtime speed (Baileys/server use)
+          - 'speed'       # + LTO: faster, much longer build
+          - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 env:
-  NDK_VERSION: 'r27c'          # NDK r27c (Clang 18)
-  MIN_API: '24'                # Node v24+ officially requires API 24+ (Android 7.0). Do NOT set below 24.
+  NDK_VERSION: 'r27c'
+  MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
 jobs:
   build:
     name: android-${{ matrix.abi }}
     runs-on: ubuntu-latest
+    # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
+    # x64 hosts has open bugs (nodejs/node#58975). Never let it block arm64.
+    continue-on-error: ${{ matrix.experimental || false }}
     permissions:
-      contents: write          # only used for the Release-attach step
+      contents: write
     strategy:
-      fail-fast: false         # one ABI failing shouldn't cancel the other
+      fail-fast: false
       matrix:
         include:
-          - abi: armeabi-v7a          # 32-bit ARM
-            dest_cpu: arm
-            target: armv7a-linux-androideabi
-          - abi: arm64-v8a            # 64-bit ARM
+          - abi: arm64-v8a            # 64-bit ARM — verified working
             dest_cpu: arm64
             target: aarch64-linux-android
+          - abi: armeabi-v7a          # 32-bit ARM — experimental
+            dest_cpu: arm
+            target: armv7a-linux-androideabi
+            experimental: true
 
     steps:
-      # ---------- 0. Resolve inputs (version + library name) ----------
+      # ---------- 0. Resolve inputs ----------
       - name: Resolve inputs
         run: |
           REQ="${{ inputs.node_version || 'v24.x' }}"
@@ -66,11 +70,9 @@ jobs:
           echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
 
           NAME="${{ inputs.lib_name || 'node' }}"
-          NAME="${NAME#lib}"      # strip leading "lib" if present
-          NAME="${NAME%.so}"      # strip trailing ".so" if present
+          NAME="${NAME#lib}"; NAME="${NAME%.so}"
           if ! [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            echo "::error::Invalid lib_name '$NAME' — use letters, digits, _ or - only"
-            exit 1
+            echo "::error::Invalid lib_name '$NAME'"; exit 1
           fi
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Building Node.js '$REQ' as lib$NAME.so"
@@ -86,7 +88,6 @@ jobs:
           echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$ANDROID_NDK}" >> "$GITHUB_ENV"
           TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
-          ls "$TC/bin" | grep -E 'clang|llvm-(ar|ranlib|strip|readelf)' | head
 
       # ---------- 2. Host build tools ----------
       - name: Install host build tools
@@ -95,9 +96,47 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             python3 g++ make git ca-certificates patchelf
 
+      - name: Install 32-bit multilib (armeabi-v7a only)
+        if: matrix.dest_cpu == 'arm'
+        run: sudo apt-get install -y gcc-multilib g++-multilib
+        # V8 mandates 32-bit host tools when targeting 32-bit arm.
+
       # ---------- 3. Node.js source ----------
       - name: Clone Node.js (${{ env.NODE_REF }})
         run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
+
+      # ---------- 3b. Patch known Android cross-build issues (nodejs/node#58975) ----------
+      - name: Patch V8 for Android cross-build
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path} (maybe already fixed upstream)")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          # Bionic ships <execinfo.h> but declares backtrace*() only for API 33+.
+          # If this file is ever compiled by the NDK clang, provide no-op stubs.
+          patch('deps/v8/src/base/debug/stack_trace_posix.cc',
+                '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"',
+                '#if defined(__ANDROID__)\n'
+                'extern "C" int backtrace(void**, int) { return 0; }\n'
+                'extern "C" char** backtrace_symbols(void* const*, int) { return nullptr; }\n'
+                'extern "C" void backtrace_symbols_fd(void* const*, int, int) {}\n'
+                '#endif\n\n'
+                '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"')
+
+          # static_assert too strict for some clang/libc++ combos
+          patch('deps/v8/src/base/small-vector.h',
+                '  ASSERT_TRIVIALLY_COPYABLE(T);',
+                '  // ASSERT_TRIVIALLY_COPYABLE(T);  // android xbuild: nodejs/node#58975')
+          PYEOF
 
       # ---------- 4. Cross-compile ----------
       - name: Cross-compile Node.js for ${{ matrix.abi }}
@@ -106,8 +145,7 @@ jobs:
           export TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$TC/bin:$PATH"
 
-          # The API-level suffix (24) selects the platform — NDK equivalent of
-          # CMake's -DANDROID_PLATFORM=android-24.
+          # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
           export CC="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           export CXX="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
           export AR="$TC/bin/llvm-ar"
@@ -115,24 +153,31 @@ jobs:
           export RANLIB="$TC/bin/llvm-ranlib"
           export STRIP="$TC/bin/llvm-strip"
           export READELF="$TC/bin/llvm-readelf"
-          export LINK="$CXX"
+          # NOTE: do NOT export LINK — gyp reads it for the HOST linker and breaks.
 
-          # These GYP_DEFINES mirror Node's official android-configure script.
-          # android_ndk_path is REQUIRED — node.gyp fails without it.
+          # CRITICAL: host build tools must use the host compiler.
+          # Without this, configure probes the ARM clang and thinks host_arch=arm,
+          # and host tools (torque/mksnapshot) get built with the Android toolchain.
+          export CC_host=gcc
+          export CXX_host=g++
+
+          # V8 requires 32-bit host tools for 32-bit targets
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
+          fi
+
+          # android_ndk_path is REQUIRED (node.gyp fails without it)
           export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME}"
 
-          # 16 KB alignment → keeps working on Android 15/16 (API 35/36) 16 KB-page devices
+          # 16 KB page alignment for Android 15/16 devices
           export LDFLAGS="-Wl,-z,max-page-size=16384"
 
-          # Profile selection
           EXTRA_FLAGS=""
           case "${{ inputs.profile || 'balanced' }}" in
             speed) EXTRA_FLAGS="--enable-lto" ;;
             size)  EXTRA_FLAGS="--v8-lite-mode" ;;
           esac
 
-          # NOTE: no --without-snapshot — modern Node forbids it, and cross-builds
-          # generate snapshots via host tools. Keeping snapshots = faster startup.
           ./configure \
             --cross-compiling \
             --dest-os=android \
@@ -144,44 +189,41 @@ jobs:
             --openssl-no-asm \
             $EXTRA_FLAGS
 
-          make -j"$(nproc)"
+          # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
+          # in some configurations, silently breaking host-tool linking).
+          make -j"$(nproc)" CC.host=gcc CXX.host=g++ LINK.host=g++ AR.host=ar
 
-      # ---------- 5. Rename to lib<name>.so, strip, package ----------
+      # ---------- 5. Rename, strip, package ----------
       - name: Package lib${{ env.LIB_NAME }}.so + node
+        if: success()
         working-directory: node
         run: |
           TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           LIB="lib${LIB_NAME}.so"
-
           "$TC/bin/llvm-readelf" -h out/Release/lib.target/libnode.so | grep -E 'Class|Machine|Type'
-
           cp out/Release/lib.target/libnode.so "$LIB"
           cp out/Release/node node
-
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
           "$TC/bin/llvm-strip" --strip-all node
-
-          # Make the rename real: fix SONAME + the node binary's DT_NEEDED entry
           if [ "$LIB_NAME" != "node" ]; then
             patchelf --set-soname "$LIB" "$LIB"
             patchelf --replace-needed libnode.so "$LIB" node
           fi
-          echo "SONAME: $(patchelf --print-soname "$LIB")"
-
           tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
           ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
 
-      # ---------- 6a. Upload as build artifact ----------
+      # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
           retention-days: 14
 
-      # ---------- 6b. Attach to a Release (tag pushes only) ----------
+      # ---------- 6b. Attach to Release (tag pushes only) ----------
       - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: success() && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
