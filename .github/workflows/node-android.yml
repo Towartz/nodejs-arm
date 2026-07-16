@@ -1,0 +1,190 @@
+# .github/workflows/node-android.yml
+# Cross-compiles Node.js for Android: armeabi-v7a (32-bit) + arm64-v8a (64-bit)
+# Produces per ABI: lib<name>.so (custom name, for embedding) + node CLI binary.
+name: Node.js for Android (ARM)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']            # pushing a tag (e.g. v1.0.0) also attaches builds to a Release
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Node.js version to build'
+        type: choice
+        default: 'v24.x'
+        options:
+          - 'v24.x'       # LTS (Krypton) — recommended for stability
+          - 'v26.x'       # Latest release line
+          - 'custom'      # use custom_ref below (any tag/branch, e.g. v24.5.0, v27.x)
+      custom_ref:
+        description: 'Custom git ref — only used when "custom" is selected (e.g. v24.5.0)'
+        required: false
+        default: ''
+      lib_name:
+        description: 'Library name — output will be lib<name>.so (e.g. "aurora" → libaurora.so)'
+        required: false
+        default: 'node'
+      profile:
+        description: 'Build profile'
+        type: choice
+        default: 'balanced'
+        options:
+          - 'balanced'    # JIT + -O3: best runtime speed (best for Baileys/server use)
+          - 'speed'       # + LTO: ~5–15% faster, but build takes much longer
+          - 'size'        # + v8-lite-mode: much lower RAM usage, but slower JS/crypto
+
+env:
+  NDK_VERSION: 'r27c'          # NDK r27c (Clang 18). r28+ only needed for API-36 headers.
+  MIN_API: '21'                # minSdk 21 = Android 5.0 (== CMake's -DANDROID_PLATFORM=android-21)
+  ANDROID_PLATFORM: 'android-21'
+
+jobs:
+  build:
+    name: android-${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # only used for the Release-attach step
+    strategy:
+      fail-fast: false         # one ABI failing shouldn't cancel the other
+      matrix:
+        include:
+          - abi: armeabi-v7a          # 32-bit ARM
+            dest_cpu: arm
+            target: armv7a-linux-androideabi
+          - abi: arm64-v8a            # 64-bit ARM
+            dest_cpu: arm64
+            target: aarch64-linux-android
+
+    steps:
+      # ---------- 0. Resolve inputs (version + library name) ----------
+      - name: Resolve inputs
+        run: |
+          # --- Node.js ref ---
+          REQ="${{ inputs.node_version || 'v24.x' }}"
+          if [ "$REQ" = "custom" ]; then REQ="${{ inputs.custom_ref }}"; fi
+          test -n "$REQ" || { echo "::error::custom_ref is empty"; exit 1; }
+          echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
+
+          # --- Library name: accept "aurora", "libaurora" or "libaurora.so" ---
+          NAME="${{ inputs.lib_name || 'node' }}"
+          NAME="${NAME#lib}"      # strip leading "lib" if present
+          NAME="${NAME%.so}"      # strip trailing ".so" if present
+          if ! [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::Invalid lib_name '$NAME' — use letters, digits, _ or - only"
+            exit 1
+          fi
+          echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
+
+          echo "Building Node.js '$REQ' as lib$NAME.so"
+
+      # ---------- 1. Android NDK ----------
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: Verify NDK toolchain paths
+        run: |
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$ANDROID_NDK}" >> "$GITHUB_ENV"
+          TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+          test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          ls "$TC/bin" | grep -E 'clang|llvm-(ar|ranlib|strip|readelf)' | head
+
+      # ---------- 2. Host build tools ----------
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 g++ make git ca-certificates patchelf
+
+      # ---------- 3. Node.js source ----------
+      - name: Clone Node.js ($NODE_REF)
+        run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
+
+      # ---------- 4. Cross-compile ----------
+      - name: Cross-compile Node.js for ${{ matrix.abi }}
+        working-directory: node
+        run: |
+          export TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="$TC/bin:$PATH"
+
+          # The "21" suffix selects the API level (NDK equivalent of
+          # -DANDROID_PLATFORM=android-21).
+          export CC="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          export CXX="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          export AR="$TC/bin/llvm-ar"
+          export NM="$TC/bin/llvm-nm"
+          export RANLIB="$TC/bin/llvm-ranlib"
+          export STRIP="$TC/bin/llvm-strip"
+          export READELF="$TC/bin/llvm-readelf"
+          export LINK="$CXX"
+
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }}"
+
+          # 16 KB alignment → keeps working on Android 15/16 (API 35/36) 16 KB-page devices
+          export LDFLAGS="-Wl,-z,max-page-size=16384"
+
+          # Profile selection
+          EXTRA_FLAGS=""
+          case "${{ inputs.profile || 'balanced' }}" in
+            speed) EXTRA_FLAGS="--enable-lto" ;;
+            size)  EXTRA_FLAGS="--v8-lite-mode" ;;
+          esac
+
+          ./configure \
+            --cross-compiling \
+            --dest-os=android \
+            --dest-cpu=${{ matrix.dest_cpu }} \
+            --shared \
+            --with-intl=none \
+            --without-npm \
+            --without-corepack \
+            --openssl-no-asm \
+            --without-snapshot \
+            --without-node-snapshot \
+            $EXTRA_FLAGS
+
+          make -j"$(nproc)"
+
+      # ---------- 5. Rename to lib<name>.so, strip, package ----------
+      - name: Package lib${{ env.LIB_NAME }}.so + node
+        working-directory: node
+        run: |
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          LIB="lib${LIB_NAME}.so"
+
+          "$TC/bin/llvm-readelf" -h out/Release/lib.target/libnode.so | grep -E 'Class|Machine|Type'
+
+          cp out/Release/lib.target/libnode.so "$LIB"
+          cp out/Release/node node
+
+          "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
+          "$TC/bin/llvm-strip" --strip-all node
+
+          # Make the rename real, not just cosmetic:
+          #  - set the library's SONAME to the new name
+          #  - point the node CLI binary at the new name (its DT_NEEDED says libnode.so)
+          if [ "$LIB_NAME" != "node" ]; then
+            patchelf --set-soname "$LIB" "$LIB"
+            patchelf --replace-needed libnode.so "$LIB" node
+          fi
+          echo "SONAME: $(patchelf --print-soname "$LIB")"
+
+          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
+          ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+
+      # ---------- 6a. Upload as build artifact ----------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
+          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          retention-days: 14
+
+      # ---------- 6b. Attach to a Release (tag pushes only) ----------
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
