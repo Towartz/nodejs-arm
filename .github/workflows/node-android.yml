@@ -352,66 +352,58 @@ jobs:
           # cpu_features.c uses the NDK cpufeatures library which is not compiled in
           # the gyp build).  Switch to getauxval(AT_HWCAP) which is available in
           # bionic and is what the existing Linux ARM64 code path already uses.
-          patch('deps/zlib/cpu_features.c',
-                '#if defined(ARMV8_OS_ANDROID)\n'
-                '#include <cpu-features.h>\n'
-                '#elif defined(ARMV8_OS_LINUX)',
-                '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)')
-          # Merge the Android include into the Linux include block (now both use
-          # the same headers). The first patch removed the Android #if line above;
-          # add the new headers after the combined condition.
-          patch_c = pathlib.Path('deps/zlib/cpu_features.c')
-          s = patch_c.read_text()
-          old_linux_incl = (
+          # Apply as three coordinated string replacements on the same file.
+          zlib_c = pathlib.Path('deps/zlib/cpu_features.c')
+          s = zlib_c.read_text()
+          # 1. Merge Android include block into Linux include block
+          old_incl = (
+              '#if defined(ARMV8_OS_ANDROID)\n'
+              '#include <cpu-features.h>\n'
+              '#elif defined(ARMV8_OS_LINUX)\n'
+              '#include <asm/hwcap.h>\n'
+              '#include <sys/auxv.h>')
+          new_incl = (
               '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
               '#include <asm/hwcap.h>\n'
               '#include <sys/auxv.h>')
-          if old_linux_incl in s:
-              print("combined ARM includes already — good")
+          if old_incl in s:
+              s = s.replace(old_incl, new_incl, 1)
+              print("patched deps/zlib/cpu_features.c (includes)")
           else:
-              # First edit merged the #if lines; now add includes after the merged #if.
-              # The line should be: #if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)
-              # followed by the old Android include. Replace it.
-              new_block = (
-                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
-                  '#include <asm/hwcap.h>\n'
-                  '#include <sys/auxv.h>\n'
-                  '#elif defined(ARMV8_OS_FUCHSIA)')
-              # Find the merged #if line (from the first patch) and the #elif that follows
-              target = (
-                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
-                  '#include <cpu-features.h>\n'
-                  '#elif defined(ARMV8_OS_FUCHSIA)')
-              replacement = (
-                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
-                  '#include <asm/hwcap.h>\n'
-                  '#include <sys/auxv.h>\n'
-                  '#elif defined(ARMV8_OS_FUCHSIA)')
-              if target in s:
-                  patch_c.write_text(s.replace(target, replacement, 1))
-                  print("patched deps/zlib/cpu_features.c (includes)")
-              else:
-                  print("::warning::could not find merged Android/Linux include block in cpu_features.c")
-
-          # Replace the two android_getCpuFeatures() branches with getauxval().
-          patch('deps/zlib/cpu_features.c',
-                '#elif defined(ARMV8_OS_ANDROID) && defined(__aarch64__)\n'
-                '    uint64_t features = android_getCpuFeatures();\n'
-                '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM64_FEATURE_CRC32);\n'
-                '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM64_FEATURE_PMULL);',
-                '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && defined(__aarch64__)\n'
-                '    unsigned long features = getauxval(AT_HWCAP);\n'
-                '    arm_cpu_enable_crc32 = !!(features & HWCAP_CRC32);\n'
-                '    arm_cpu_enable_pmull = !!(features & HWCAP_PMULL);')
-          patch('deps/zlib/cpu_features.c',
-                '#elif defined(ARMV8_OS_ANDROID) /* aarch32 */\n'
-                '    uint64_t features = android_getCpuFeatures();\n'
-                '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM_FEATURE_CRC32);\n'
-                '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM_FEATURE_PMULL);',
-                '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && (defined(__ARM_NEON) || defined(__ARM_NEON__))\n'
-                '    unsigned long features = getauxval(AT_HWCAP2);\n'
-                '    arm_cpu_enable_crc32 = !!(features & HWCAP2_CRC32);\n'
-                '    arm_cpu_enable_pmull = !!(features & HWCAP2_PMULL);')
+              print("::warning::could not find Android/Linux include block in cpu_features.c")
+          # 2. Replace aarch64 Android branch (uses #if, not #elif)
+          old_aarch64 = (
+              '#if defined(ARMV8_OS_ANDROID) && defined(__aarch64__)\n'
+              '    uint64_t features = android_getCpuFeatures();\n'
+              '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM64_FEATURE_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM64_FEATURE_PMULL);')
+          new_aarch64 = (
+              '#if (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && defined(__aarch64__)\n'
+              '    unsigned long features = getauxval(AT_HWCAP);\n'
+              '    arm_cpu_enable_crc32 = !!(features & HWCAP_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & HWCAP_PMULL);')
+          if old_aarch64 in s:
+              s = s.replace(old_aarch64, new_aarch64, 1)
+              print("patched deps/zlib/cpu_features.c (aarch64)")
+          else:
+              print("::warning::could not find Android aarch64 branch in cpu_features.c")
+          # 3. Replace aarch32 Android branch (uses #elif)
+          old_aarch32 = (
+              '#elif defined(ARMV8_OS_ANDROID) /* aarch32 */\n'
+              '    uint64_t features = android_getCpuFeatures();\n'
+              '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM_FEATURE_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM_FEATURE_PMULL);')
+          new_aarch32 = (
+              '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && (defined(__ARM_NEON) || defined(__ARM_NEON__))\n'
+              '    unsigned long features = getauxval(AT_HWCAP2);\n'
+              '    arm_cpu_enable_crc32 = !!(features & HWCAP2_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & HWCAP2_PMULL);')
+          if old_aarch32 in s:
+              s = s.replace(old_aarch32, new_aarch32, 1)
+              print("patched deps/zlib/cpu_features.c (aarch32)")
+          else:
+              print("::warning::could not find Android aarch32 branch in cpu_features.c")
+          zlib_c.write_text(s)
 
           # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
           # matching #endif before the existing #endif that closes the #ifdef FICLONE
@@ -588,7 +580,7 @@ jobs:
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
           retention-days: 14
 
-      # ---------- 6b. Attach to Release (tag pushes only) ----------
+      # ---------- 6b. Attach to GitHub Release (tag pushes only) ----------
       - name: Attach to GitHub Release
         if: success() && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
