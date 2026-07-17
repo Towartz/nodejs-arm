@@ -340,6 +340,14 @@ jobs:
                 '}  // namespace std\n'
                 '#endif')
 
+          # FIX for: std::atomic_ref used in deps/v8/src/base/memcopy.h (Relaxed_Memset)
+          # which does NOT include atomicops.h — its own #include <atomic> won't pick
+          # up the polyfill above. Use __atomic_store_n directly on the integral type T
+          # (guaranteed by the `requires std::is_integral_v<T>` constraint).
+          patch('deps/v8/src/base/memcopy.h',
+                '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
+                '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
+
           # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
           # matching #endif before the existing #endif that closes the #ifdef FICLONE
           # block. Run as a second, explicit pass (not folded into the patch() call
