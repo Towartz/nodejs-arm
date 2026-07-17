@@ -410,6 +410,77 @@ jobs:
           else:
               fs_c.write_text(s.replace(old_close, new_close, 1))
               print("closed #ifndef __ANDROID__ block in deps/uv/src/unix/fs.c")
+
+          # ---- Termux ported patches (from nodejs/node#57748 / termux-packages) ----
+
+          # 1. v8.gyp: add -latomic for Android + add platform-linux.h source
+          patch('tools/v8_gypfiles/v8.gyp',
+                "        ['(OS==\"linux\" and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {",
+                "        ['((OS==\"linux\" or OS==\"android\") and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {")
+          patch('tools/v8_gypfiles/v8.gyp',
+                "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',",
+                "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',\n"
+                "            '<(V8_ROOT)/src/base/platform/platform-linux.h',")
+
+          # 2. node.gyp: add -latomic for Android
+          patch('node.gyp',
+                "      ['OS==\"linux\" and clang==1', {",
+                "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
+
+          # 3. toolchain.gypi: v8_android_log_stdout=1 + remove branch-protection
+          patch('tools/v8_gypfiles/toolchain.gypi',
+                "    'v8_android_log_stdout%': 0,",
+                "    'v8_android_log_stdout%': 1,")
+          v8_tc = pathlib.Path('tools/v8_gypfiles/toolchain.gypi')
+          s = v8_tc.read_text()
+          bp_block = (
+              "        ['v8_control_flow_integrity==1', {\n"
+              "            'cflags': [ '-mbranch-protection=standard' ],\n"
+              "          }],")
+          if bp_block in s:
+              s = s.replace(bp_block, "          # removed for Android (NDK r27c doesn't support this)")
+              v8_tc.write_text(s)
+              print("patched tools/v8_gypfiles/toolchain.gypi (removed branch-protection)")
+          else:
+              print("::warning::branch-protection block not found in toolchain.gypi")
+
+          # 4. common.gypi: remove cpufeatures include (we use getauxval in zlib now)
+          patch('common.gypi',
+                "          ['OS == \"android\"', {\n"
+                "            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],\n"
+                "            'ldflags': [ '-fPIC' ]\n"
+                "          }],",
+                "")
+
+          # 5. ninja.py: fix SHARED_INTERMEDIATE_DIR to separate host/target obj dirs.
+          # Without this, host and target builds write into the same obj/ tree,
+          # causing source-file collisions when cross-compiling for a different arch
+          # (e.g., x64 host + arm target). This is the root cause of the
+          # push_registers_asm.cc x64-on-arm error (nodejs/node#58975).
+          patch('tools/gyp/pylib/gyp/generator/ninja.py',
+                "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/gen\",",
+                "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/$|OBJ/gen\",")
+          ninja_py = pathlib.Path('tools/gyp/pylib/gyp/generator/ninja.py')
+          s = ninja_py.read_text()
+          obj_var_block = (
+              "        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+              "\n"
+              "        return path")
+          obj_var_new = (
+              "        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+              "\n"
+              "        obj = \"obj\"\n"
+              "        if self.toolset != \"target\":\n"
+              "            obj += \".\" + self.toolset\n"
+              "        path = path.replace(\"$|OBJ\", obj)\n"
+              "\n"
+              "        return path")
+          if obj_var_block in s:
+              s = s.replace(obj_var_block, obj_var_new, 1)
+              ninja_py.write_text(s)
+              print("patched tools/gyp/pylib/gyp/generator/ninja.py (OBJ variable)")
+          else:
+              print("::warning::could not find ExpandSpecial return in ninja.py")
           PYEOF
 
           echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
