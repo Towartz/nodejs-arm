@@ -35,7 +35,7 @@ on:
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 env:
-  NDK_VERSION: 'r29'
+  NDK_VERSION: 'r27c'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -150,73 +150,24 @@ jobs:
 
           # FIX for: undefined symbol v8_internal_simulator_ProbeMemory /
           # trap_handler::RegisterDefaultTrapHandler / TryHandleSignal at the
-          # mksnapshot link step (root cause: deps/v8/src/trap-handler/trap-handler.h
-          # decides V8_TRAP_HANDLER_SUPPORTED per V8_HOST_ARCH/V8_TARGET_ARCH/V8_OS
-          # combination; the ARM64-target-simulated-on-x64-Linux-host branch says
-          # "supported", but Node's gyp port of V8's build never compiles the
-          # matching trap-handler/simulator objects for the .host toolset — see
-          # nodejs/node#36287, where the original reporter traced this to the exact
-          # same host-toolset object selection gap).
-          #
-          # Node.js ships an official patch for this at android-patches/trap-handler.h.patch
-          # in THIS checkout (applied automatically by ./android-configure, which this
-          # workflow does not use — it calls ./configure directly). That in-tree patch
-          # is a hunk against a moving upstream file, so it goes stale across Node refs
-          # (nodejs/node#60369 documents prior staleness) and this workflow has no way to
-          # fetch a version pinned to whatever ref the user picks in node_version/custom_ref.
-          #
-          # Use Termux's nodejs-lts patch instead (github.com/termux/termux-packages,
-          # packages/nodejs-lts/deps-v8-src-trap-handler-trap-handler.h.patch, fetched and
-          # reviewed on 2026-07-17): it deletes the whole V8_HOST_ARCH/V8_TARGET_ARCH/V8_OS
-          # gating table and hardcodes V8_TRAP_HANDLER_SUPPORTED=false, so there's no
-          # per-arch branch left to go stale — it can't apply-fail the way an in-tree hunk
-          # can, at the cost of losing V8's signal-based OOB-trap fast path for WASM (same
-          # tradeoff as the v8_enable_webassembly=false fallback already noted below; this
-          # is strictly narrower since only the trap-handler fast path is dropped, not all
-          # of WASM). Applied as an in-tree patch to keep this step's failure mode identical
-          # to the block above (::warning on missing context) rather than a hard build stop:
-          patch('deps/v8/src/trap-handler/trap-handler.h',
-                textwrap.dedent('''\
-                    // X64 on Linux, Windows, MacOS, FreeBSD.
-                    #if V8_HOST_ARCH_X64 && V8_TARGET_ARCH_X64 &&                        \\
-                        ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN || \\
-                         V8_OS_FREEBSD)
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // Arm64 (non-simulator) on Linux, Windows, MacOS.
-                    #elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_ARM64 && \\
-                        ((V8_OS_LINUX && !V8_OS_ANDROID) || V8_OS_WIN || V8_OS_DARWIN)
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // Arm64 simulator on x64 on Linux, Mac, or Windows.
-                    //
-                    // The simulator case uses some inline assembly code, which cannot be
-                    // compiled with MSVC, so don't enable the trap handler in that case.
-                    // (MSVC #defines _MSC_VER, but so does Clang when targeting Windows, hence
-                    // the check for __clang__.)
-                    #elif V8_TARGET_ARCH_ARM64 && V8_HOST_ARCH_X64 && \\
-                        (V8_OS_LINUX || V8_OS_DARWIN || V8_OS_WIN) && \\
-                        (!defined(_MSC_VER) || defined(__clang__))
-                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // Loong64 (non-simulator) on Linux.
-                    #elif V8_TARGET_ARCH_LOONG64 && V8_HOST_ARCH_LOONG64 && V8_OS_LINUX
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // Loong64 simulator on x64 on Linux
-                    #elif V8_TARGET_ARCH_LOONG64 && V8_HOST_ARCH_X64 && V8_OS_LINUX
-                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // RISCV64 (non-simulator) on Linux.
-                    #elif V8_TARGET_ARCH_RISCV64 && V8_HOST_ARCH_RISCV64 && V8_OS_LINUX && \\
-                        !V8_OS_ANDROID
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // RISCV64 simulator on x64 on Linux
-                    #elif V8_TARGET_ARCH_RISCV64 && V8_HOST_ARCH_X64 && V8_OS_LINUX
-                    #define V8_TRAP_HANDLER_VIA_SIMULATOR
-                    #define V8_TRAP_HANDLER_SUPPORTED true
-                    // Everything else is unsupported.
-                    #else
-                    #define V8_TRAP_HANDLER_SUPPORTED false
-                    #endif'''),
-                '#define V8_TRAP_HANDLER_SUPPORTED false')
+          # mksnapshot link step. Replaces the entire V8_TRAP_HANDLER_SUPPORTED
+          # detection block with a hardcoded false for all targets. Uses
+          # boundary markers (start="// X64 on Linux", end="#define
+          # V8_TRAP_HANDLER_SUPPORTED false\n#endif") that are stable across
+          # v24.x and v26.x, unlike the full-chain-text approach that went stale
+          # when v26.x added new branches (#if USE_SIMULATOR guards etc.).
+          th_path = pathlib.Path('deps/v8/src/trap-handler/trap-handler.h')
+          content = th_path.read_text()
+          marker_start = '// X64 on Linux, Windows, MacOS, FreeBSD.'
+          marker_end = '#define V8_TRAP_HANDLER_SUPPORTED false\n#endif'
+          if marker_start in content and marker_end in content:
+              idx_start = content.index(marker_start)
+              idx_end = content.index(marker_end, idx_start) + len(marker_end)
+              content = content[:idx_start] + '#define V8_TRAP_HANDLER_SUPPORTED false' + content[idx_end:]
+              th_path.write_text(content)
+              print("patched deps/v8/src/trap-handler/trap-handler.h")
+          else:
+              print("::warning::could not find trap-handler block boundaries")
 
           # FIX for: libuv's main 'libuv' gyp target uses a bare 'include_dirs' key
           # (no '+'), which replaces gyp's default include path list for that target
@@ -365,6 +316,14 @@ jobs:
           patch('deps/v8/src/base/memcopy.h',
                 '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
                 '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
+
+          # FIX for: alias template 'ShuffleArray' requires template arguments in
+          # C++20 mode with NDK's clang (argument deduction only allowed for class
+          # templates, not alias templates). Add explicit <kSimd128Size> (the
+          # constant is already used on the next line).
+          patch('deps/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc',
+                '    wasm::SimdShuffle::ShuffleArray shuffle_bytes;',
+                '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
 
           # FIX for: undefined symbol android_getCpuFeatures at link time (zlib's
           # cpu_features.c uses the NDK cpufeatures library which is not compiled in
