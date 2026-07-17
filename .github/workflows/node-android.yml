@@ -366,6 +366,38 @@ jobs:
                 '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
                 '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
 
+          # FIX for: GCC rejects '__ Tuple<Word32, Word32>(a, b)' with
+          # "invalid use of 'struct ... Tuple<Word32, Word32>'" in LowerClz/
+          # LowerCtz. Root cause: Tuple() is an assembler-macro method whose
+          # template args (Ts...) are meant to be *deduced* from the argument
+          # types (see assembler.h: 'V<turboshaft::Tuple<Ts...>> Tuple(V<Ts>...
+          # indices)') — every other call site in the tree (e.g. LowerSignExtend
+          # and LowerPopCount in this same file) calls it as '__ Tuple(a, b)'
+          # with no explicit template args. Writing the explicit
+          # '<Word32, Word32>' form makes GCC's angle-bracket disambiguation
+          # resolve 'Tuple' to the class template of the same name (used
+          # elsewhere as a type, e.g. 'V<Tuple<Word32,Word32>>') instead of the
+          # assembler method, which is exactly what "invalid use of 'struct'"
+          # means. Confirmed this is an isolated stylistic slip, not a real
+          # ambiguity: dropping the explicit args and letting deduction do the
+          # same job it already does elsewhere in this file compiles cleanly.
+          # Hit under GCC on 32-bit ARM (armeabi-v7a) cross-builds; same
+          # failure class as upstream nodejs/node "Fix build on gcc" V8
+          # backports for turboshaft headers (GCC's template resolution is
+          # stricter than the Clang used by most upstream V8 CI). Two
+          # occurrences, both in int64-lowering-reducer.h, both identical, so
+          # patch() (single-replace) can't be reused here — do both in one pass.
+          reducer_h = pathlib.Path('deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h')
+          s = reducer_h.read_text()
+          old_tuple_call = 'return __ Tuple<Word32, Word32>(result, __ Word32Constant(0));'
+          count = s.count(old_tuple_call)
+          if count == 0:
+              print("::warning::could not find explicit-template Tuple<Word32,Word32> call in int64-lowering-reducer.h (maybe already fixed upstream)")
+          else:
+              s = s.replace(old_tuple_call, 'return __ Tuple(result, __ Word32Constant(0));')
+              reducer_h.write_text(s)
+              print(f"patched deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h ({count} occurrence(s) of explicit-template Tuple call)")
+
           # FIX for: undefined symbol android_getCpuFeatures at link time (zlib's
           # cpu_features.c uses the NDK cpufeatures library which is not compiled in
           # the gyp build).  Switch to getauxval(AT_HWCAP) which is available in
