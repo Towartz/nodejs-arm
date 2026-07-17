@@ -415,7 +415,8 @@ jobs:
                     '  static_assert(IsAligned(kEntrySize, kTaggedSize));',
                     '  static_assert(IsAligned(kImplicitArgBias, kTaggedSize));']),
                   ('deps/v8/src/objects/number-string-cache.h',
-                   ['static_assert(DoubleStringCache::SizeFor']),
+                    ['static_assert(DoubleStringCache::SizeFor(DoubleStringCache::kMaxCapacity) <\n'
+                     '              kMaxRegularHeapObjectSize);']),
                   ('deps/v8/src/sandbox/js-dispatch-table.h',
                    ['static_assert(sizeof(JSDispatchEntry) == kJSDispatchTableEntrySize);']),
               ]:
