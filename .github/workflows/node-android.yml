@@ -425,7 +425,9 @@ jobs:
                       t = fp.read_text()
                       for a in asserts:
                           if a in t:
-                              t = t.replace(a, f'// {a.lstrip()}  // relaxed for cross-compile')
+                              # Block comment (/* */) so multi-line static_asserts
+                              # are fully disabled, not just their first line.
+                              t = t.replace(a, f'/* {a.lstrip()} */  // relaxed for cross-compile')
                       fp.write_text(t); print(f"  relaxed {p}")
                   else:
                       print(f"  ::warning::{p} not found")
