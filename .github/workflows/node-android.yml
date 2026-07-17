@@ -119,6 +119,9 @@ jobs:
 
           def patch(path, old, new):
               p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping — may be version-specific)")
+                  return
               s = p.read_text()
               if old not in s:
                   print(f"::warning::context not found in {path} (maybe already fixed upstream)")
