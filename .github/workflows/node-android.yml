@@ -76,20 +76,70 @@ jobs:
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
-      # ---------- 1. Android NDK ----------
-      # GitHub Actions Ubuntu 22.04 runners have NDK 29.0.14206865 pre-installed
-      - name: Use pre-installed NDK ${{ env.NDK_VERSION }}
+      # ---------- 0b. Ensure an older NDK is present (Clang 21 in r29 breaks V8) ----------
+      # Belt-and-braces: don't rely on the runner image happening to have r27/r28
+      # cached. sdkmanager is already on PATH on GitHub's Android-preinstalled
+      # runners; this is a no-op (fast) if the version is already present.
+      - name: Ensure NDK 27.2.12479018 is installed (Clang predates turboshaft break)
         run: |
-          NDK_HOME="/usr/local/lib/android/sdk/ndk/29.0.14206865"
-          if [ ! -d "$NDK_HOME" ]; then
-            echo "::error::NDK r29 not found pre-installed at $NDK_HOME"
+          yes | sdkmanager --install "ndk;27.2.12479018" --sdk_root="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" \
+            || echo "::warning::sdkmanager install failed; step 1 below will fall back to r29's Clang if no older NDK is found"
+
+      # ---------- 1. Android NDK ----------
+      # GitHub Actions Ubuntu 22.04 runners have NDK 29.0.14206865 pre-installed.
+      #
+      # KNOWN ISSUE: NDK r29 ships Clang 21 (clang-r563880c), which fails to
+      # compile deps/v8/src/compiler/turboshaft/assembler.h on this Node branch —
+      # a template/CRTP name-resolution regression in AssemblerOpInterface
+      # (symptom: "expected '}'" at pipeline.cc + cascading undeclared-identifier
+      # errors for resolve/ReduceIfReachable*/matcher_). Not an ARM- or
+      # ABI-specific issue; reproduces identically across target architectures.
+      # No upstream nodejs/node fix is filed for this Clang generation as of
+      # this writing, so pin the *compiler* to an older NDK's Clang while
+      # keeping NDK r29's sysroot/platform for API 24 + 16KB page-size support.
+      # If/when nodejs/node ships a turboshaft patch validated against Clang 21,
+      # this pin can be dropped in favor of r29 alone.
+      - name: Select Android toolchain (NDK ${{ env.NDK_VERSION }} sysroot, older Clang for V8 build)
+        run: |
+          SYSROOT_NDK="/usr/local/lib/android/sdk/ndk/29.0.14206865"
+          if [ ! -d "$SYSROOT_NDK" ]; then
+            echo "::error::NDK r29 not found pre-installed at $SYSROOT_NDK"
             echo "Available NDK versions:"
             ls /usr/local/lib/android/sdk/ndk/ 2>/dev/null || echo "(none)"
             exit 1
           fi
-          echo "ANDROID_NDK_HOME=$NDK_HOME" >> "$GITHUB_ENV"
-          TC="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+
+          # Prefer r27 or r28's Clang (pre-dates the turboshaft/Clang-21 break).
+          # Try known pre-installed paths first; fall back to r29 with a loud
+          # warning so a bad pin never silently reproduces this same failure.
+          CLANG_NDK=""
+          for CAND in \
+            /usr/local/lib/android/sdk/ndk/27.2.12479018 \
+            /usr/local/lib/android/sdk/ndk/27.1.12297006 \
+            /usr/local/lib/android/sdk/ndk/28.2.13676358 \
+            /usr/local/lib/android/sdk/ndk/28.1.13356709
+          do
+            if [ -d "$CAND" ]; then CLANG_NDK="$CAND"; break; fi
+          done
+
+          if [ -z "$CLANG_NDK" ]; then
+            echo "::warning::No older NDK (r27/r28) found pre-installed on this runner."
+            echo "::warning::Falling back to r29's Clang 21, which is known to fail on"
+            echo "::warning::deps/v8/src/compiler/turboshaft/assembler.h. Install an"
+            echo "::warning::older NDK explicitly (e.g. via android-actions/setup-android"
+            echo "::warning::or a manual sdkmanager --install \"ndk;27.2.12479018\" step)"
+            echo "::warning::before this job to fix the build."
+            CLANG_NDK="$SYSROOT_NDK"
+          else
+            echo "Using Clang from $CLANG_NDK (sysroot/platform still from r29)"
+          fi
+
+          echo "ANDROID_NDK_HOME=$SYSROOT_NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_CLANG_HOME=$CLANG_NDK" >> "$GITHUB_ENV"
+
+          TC="$CLANG_NDK/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang" --version | head -1
 
       # ---------- 2. Host build tools ----------
       - name: Install host build tools
@@ -475,7 +525,12 @@ jobs:
       - name: Cross-compile Node.js for ${{ matrix.abi }}
         working-directory: node
         run: |
-          export TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          # TC = compiler toolchain (may be an older NDK, see step 1 above — Clang 21
+          #      from r29 fails to compile V8 turboshaft's assembler.h).
+          # SYSROOT_TC = r29's toolchain dir, used only for llvm-strip/llvm-readelf
+          #      in the packaging step later; kept separate so binutils/sysroot stay
+          #      on r29 even if CC/CXX come from an older NDK.
+          export TC="${ANDROID_NDK_CLANG_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$TC/bin:$PATH"
 
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
