@@ -348,6 +348,71 @@ jobs:
                 '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
                 '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
 
+          # FIX for: undefined symbol android_getCpuFeatures at link time (zlib's
+          # cpu_features.c uses the NDK cpufeatures library which is not compiled in
+          # the gyp build).  Switch to getauxval(AT_HWCAP) which is available in
+          # bionic and is what the existing Linux ARM64 code path already uses.
+          patch('deps/zlib/cpu_features.c',
+                '#if defined(ARMV8_OS_ANDROID)\n'
+                '#include <cpu-features.h>\n'
+                '#elif defined(ARMV8_OS_LINUX)',
+                '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)')
+          # Merge the Android include into the Linux include block (now both use
+          # the same headers). The first patch removed the Android #if line above;
+          # add the new headers after the combined condition.
+          patch_c = pathlib.Path('deps/zlib/cpu_features.c')
+          s = patch_c.read_text()
+          old_linux_incl = (
+              '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
+              '#include <asm/hwcap.h>\n'
+              '#include <sys/auxv.h>')
+          if old_linux_incl in s:
+              print("combined ARM includes already — good")
+          else:
+              # First edit merged the #if lines; now add includes after the merged #if.
+              # The line should be: #if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)
+              # followed by the old Android include. Replace it.
+              new_block = (
+                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
+                  '#include <asm/hwcap.h>\n'
+                  '#include <sys/auxv.h>\n'
+                  '#elif defined(ARMV8_OS_FUCHSIA)')
+              # Find the merged #if line (from the first patch) and the #elif that follows
+              target = (
+                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
+                  '#include <cpu-features.h>\n'
+                  '#elif defined(ARMV8_OS_FUCHSIA)')
+              replacement = (
+                  '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
+                  '#include <asm/hwcap.h>\n'
+                  '#include <sys/auxv.h>\n'
+                  '#elif defined(ARMV8_OS_FUCHSIA)')
+              if target in s:
+                  patch_c.write_text(s.replace(target, replacement, 1))
+                  print("patched deps/zlib/cpu_features.c (includes)")
+              else:
+                  print("::warning::could not find merged Android/Linux include block in cpu_features.c")
+
+          # Replace the two android_getCpuFeatures() branches with getauxval().
+          patch('deps/zlib/cpu_features.c',
+                '#elif defined(ARMV8_OS_ANDROID) && defined(__aarch64__)\n'
+                '    uint64_t features = android_getCpuFeatures();\n'
+                '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM64_FEATURE_CRC32);\n'
+                '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM64_FEATURE_PMULL);',
+                '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && defined(__aarch64__)\n'
+                '    unsigned long features = getauxval(AT_HWCAP);\n'
+                '    arm_cpu_enable_crc32 = !!(features & HWCAP_CRC32);\n'
+                '    arm_cpu_enable_pmull = !!(features & HWCAP_PMULL);')
+          patch('deps/zlib/cpu_features.c',
+                '#elif defined(ARMV8_OS_ANDROID) /* aarch32 */\n'
+                '    uint64_t features = android_getCpuFeatures();\n'
+                '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM_FEATURE_CRC32);\n'
+                '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM_FEATURE_PMULL);',
+                '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && (defined(__ARM_NEON) || defined(__ARM_NEON__))\n'
+                '    unsigned long features = getauxval(AT_HWCAP2);\n'
+                '    arm_cpu_enable_crc32 = !!(features & HWCAP2_CRC32);\n'
+                '    arm_cpu_enable_pmull = !!(features & HWCAP2_PMULL);')
+
           # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
           # matching #endif before the existing #endif that closes the #ifdef FICLONE
           # block. Run as a second, explicit pass (not folded into the patch() call
