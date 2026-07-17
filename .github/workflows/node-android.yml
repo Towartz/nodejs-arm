@@ -481,20 +481,18 @@ jobs:
               print("patched tools/gyp/pylib/gyp/generator/ninja.py (OBJ variable)")
           else:
               print("::warning::could not find ExpandSpecial return in ninja.py")
+
+          # 6. uvwasi: enable WASI readdir on Android (works fine, upstream guard
+          # was conservative). Source: Termux's nodejs-lts packaging.
+          patch('deps/uvwasi/src/uvwasi.c',
+                '#if !defined(_WIN32) && !defined(__ANDROID__)',
+                '#if !defined(_WIN32)')
           PYEOF
 
           echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
-          echo "  - common.gypi.patch: removes an OS==\"android\" cflags/ldflags stanza tied to"
-          echo "    Termux's own android_ndk_path/cpufeatures usage. This is NOT the fix for the"
-          echo "    -m32/-m64 host-cflags collision noted in the cross-compile step below --"
-          echo "    reviewed 2026-07-17 and found unrelated to that issue; if that collision is"
-          echo "    hit on the armeabi-v7a leg, look elsewhere (see the comment at that step)."
           echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
           echo "    swap /data/local/tmp for a literal @TERMUX_PREFIX@/tmp placeholder. Not"
           echo "    applicable outside Termux's own install layout; /data/local/tmp is correct here."
-          echo "  - deps-uvwasi-src-uvwasi.c.patch: re-enables WASI readdir support on Android,"
-          echo "    relying on Termux's libc environment for the underlying dirent API. Unverified"
-          echo "    against a bare NDK build and not exercised by this project's workloads."
           echo "  - deps-uv-src-unix-process.c.patch: strips post-fork setuid/setgid/setgroups"
           echo "    privilege-drop calls for Termux's unprivileged userland. Not a cross-compile"
           echo "    concern and not applicable here."
