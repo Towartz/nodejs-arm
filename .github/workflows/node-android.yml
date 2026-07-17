@@ -406,6 +406,8 @@ jobs:
                 '            return MaybeDirectHandle<Object>();                             \\\n'
                 '          }                                                                 \\\n'
                 '        }')
+          PYEOF
+
       - name: "Patch V8: turboshaft SMI assertions"
         working-directory: node
         run: |
@@ -434,7 +436,7 @@ jobs:
                   print("::warning::SMI_COMPARISON_OP assertions not found in assembler.h")
           else:
               print("::warning::assembler.h not found")
-          PYEOF
+
           if '${{ matrix.dest_cpu }}' == 'arm':
               print("applying 32-bit assertion relaxations...")
               for p, asserts in [
