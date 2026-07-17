@@ -113,30 +113,26 @@ jobs:
       # position, see nodejs/node#58505) — these are community-tracked issues
       # carried by Termux's Node.js packaging for years and partially upstreamed.
       # Expect this list to need revisiting on every Node major bump.
-      - name: Patch V8 for Android cross-build
+      #
+      # NOTE: each patch step must stay under GitHub Actions' 21000-char expression
+      # limit. The monolithic python3 block is split into logical groups below.
+      - name: "Patch V8: base + uv (stack_trace, small_vector, trap_handler, uv.gyp, fs.c)"
         working-directory: node
         run: |
           python3 - <<'PYEOF'
-          import pathlib
-          import textwrap
-
+          import pathlib, textwrap
           def patch(path, old, new):
               p = pathlib.Path(path)
               if not p.exists():
-                  print(f"::warning::file not found {path} (skipping — may be version-specific)")
+                  print(f"::warning::file not found {path} (skipping)")
                   return
               s = p.read_text()
               if old not in s:
-                  print(f"::warning::context not found in {path} (maybe already fixed upstream)")
+                  print(f"::warning::context not found in {path}")
                   return
               p.write_text(s.replace(old, new, 1))
               print(f"patched {path}")
 
-          # Bionic ships <execinfo.h> but declares backtrace*() only for API 33+.
-          # If this file is ever compiled by the NDK clang, provide no-op stubs.
-          # Confirmed still live on Node 22+/NDK r27 in nodejs/node#58505 (same
-          # three undeclared identifiers: backtrace, backtrace_symbols,
-          # backtrace_symbols_fd, in this exact file).
           patch('deps/v8/src/base/debug/stack_trace_posix.cc',
                 '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"',
                 '#if defined(__ANDROID__)\n'
@@ -146,129 +142,66 @@ jobs:
                 '#endif\n\n'
                 '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"')
 
-          # static_assert too strict for some clang/libc++ combos
           patch('deps/v8/src/base/small-vector.h',
                 '  ASSERT_TRIVIALLY_COPYABLE(T);',
-                '  // ASSERT_TRIVIALLY_COPYABLE(T);  // android xbuild: nodejs/node#58975')
+                '  // ASSERT_TRIVIALLY_COPYABLE(T);')
 
-          # FIX for: undefined symbol v8_internal_simulator_ProbeMemory /
-          # trap_handler::RegisterDefaultTrapHandler / TryHandleSignal at the
-          # mksnapshot link step. Replaces the entire V8_TRAP_HANDLER_SUPPORTED
-          # detection block with a hardcoded false for all targets. Uses
-          # boundary markers (start="// X64 on Linux", end="#define
-          # V8_TRAP_HANDLER_SUPPORTED false\n#endif") that are stable across
-          # v24.x and v26.x, unlike the full-chain-text approach that went stale
-          # when v26.x added new branches (#if USE_SIMULATOR guards etc.).
-          th_path = pathlib.Path('deps/v8/src/trap-handler/trap-handler.h')
-          content = th_path.read_text()
-          marker_start = '// X64 on Linux, Windows, MacOS, FreeBSD.'
-          marker_end = '#define V8_TRAP_HANDLER_SUPPORTED false\n#endif'
-          if marker_start in content and marker_end in content:
-              idx_start = content.index(marker_start)
-              idx_end = content.index(marker_end, idx_start) + len(marker_end)
-              content = content[:idx_start] + '#define V8_TRAP_HANDLER_SUPPORTED false' + content[idx_end:]
-              th_path.write_text(content)
-              print("patched deps/v8/src/trap-handler/trap-handler.h")
+          th = pathlib.Path('deps/v8/src/trap-handler/trap-handler.h')
+          c = th.read_text()
+          ms = '// X64 on Linux, Windows, MacOS, FreeBSD.'
+          me = '#define V8_TRAP_HANDLER_SUPPORTED false\n#endif'
+          if ms in c and me in c:
+              i0 = c.index(ms); i1 = c.index(me, i0) + len(me)
+              c = c[:i0] + '#define V8_TRAP_HANDLER_SUPPORTED false' + c[i1:]
+              th.write_text(c); print("patched trap-handler.h")
           else:
-              print("::warning::could not find trap-handler block boundaries")
+              print("::warning::trap-handler block boundaries not found")
 
-          # FIX for: libuv's main 'libuv' gyp target uses a bare 'include_dirs' key
-          # (no '+'), which replaces gyp's default include path list for that target
-          # instead of appending to it — this can drop NDK/bionic-relevant search
-          # paths that upstream's OS=="linux" defaults would normally supply. Verified
-          # against a fresh nodejs/node v24.x clone (2026-07-17): this exact 6-line
-          # block (target_name/toolsets/type/include_dirs) is present verbatim and
-          # unique in deps/uv/uv.gyp. Source: Termux's nodejs-lts packaging
-          # (packages/nodejs-lts/deps-uv-uv.gyp.patch); NOT Termux-runtime-specific
-          # (unlike several sibling patches in that same directory that hardcode a
-          # Termux install prefix — those are skipped, see the summary at the end of
-          # this step). Note: the patch file's own diff context predates libuv's
-          # 'toolsets': ['host', 'target'] line that now sits between target_name and
-          # type in current Node refs — included below since a strict copy of the old
-          # patch's context would silently no-op against this file:
           patch('deps/uv/uv.gyp',
-                '\n'.join([
-                    "      'target_name': 'libuv',",
-                    "      'toolsets': ['host', 'target'],",
-                    "      'type': '<(uv_library)',",
-                    "      'include_dirs': [",
-                    "        'include',",
-                    "        'src/',",
-                    "      ],",
-                ]),
-                '\n'.join([
-                    "      'target_name': 'libuv',",
-                    "      'toolsets': ['host', 'target'],",
-                    "      'type': '<(uv_library)',",
-                    "      'include_dirs+': [",
-                    "        'include',",
-                    "        'src/',",
-                    "      ],",
-                ]))
-          # Same issue, second occurrence: the 'include' dir under
-          # direct_dependent_settings (consumed by anything that depends on the
-          # libuv target) is also a bare 'include_dirs' key. Verified unique in the
-          # same v24.x clone:
-          patch('deps/uv/uv.gyp',
-                "        'include_dirs': [ 'include' ],",
-                "        'include_dirs+': [ 'include' ],")
-          # NOTE: Termux's deps-uv-uv.gyp.patch has a third hunk adding a
-          # ['defines': ['__USE_GNU']] entry to the OS=="android" link_settings
-          # block, aimed at a version of this file where that block's source list
-          # was an inline ['src/unix/random-sysctl-linux.c', 'src/unix/epoll.c']
-          # pair lacking '_GNU_SOURCE'. Checked against the same v24.x clone: that
-          # inline list no longer exists (libuv now uses a named
-          # '<@(uv_sources_android)' array), and the surrounding OS=="android" block
-          # already sets 'defines': ['_GNU_SOURCE'] — which itself implies
-          # __USE_GNU in glibc/bionic headers — so the underlying gap this hunk
-          # patched has already been closed upstream. Deliberately not carried
-          # forward; applying it as string-replacement would just no-op (::warning)
-          # against current Node refs, and it wouldn't help older refs either since
-          # _GNU_SOURCE already covers the same need.
+                '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs': [","        'include',","        'src/',","      ],"]),
+                '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs+': [","        'include',","        'src/',","      ],"]))
+          patch('deps/uv/uv.gyp', "        'include_dirs': [ 'include' ],", "        'include_dirs+': [ 'include' ],")
 
-          # FIX for: uv_fs_copyfile can hang or misbehave at runtime on-device.
-          # FICLONE/FICLONE_FORCE are reflink ioctls that the NDK's bionic headers
-          # define (so the #ifdef FICLONE guard in deps/uv/src/unix/fs.c compiles
-          # cleanly), but the ioctl itself is unimplemented on most Android
-          # filesystem drivers (ext4/f2fs configs vary by OEM/kernel). This is a
-          # runtime correctness issue, not a build failure, so it won't surface in
-          # this CI job — only later, in whatever app embeds lib${LIB_NAME}.so and
-          # calls fs.copyFile/cp. Guard it out at compile time so unix/fs.c never
-          # attempts the ioctl on Android in the first place. Source: Termux's
-          # nodejs-lts packaging (packages/nodejs-lts/avoid-ficlone-ioctl.patch,
-          # fetched and reviewed 2026-07-17); this one is a straight #ifndef
-          # __ANDROID__ guard, not Termux-prefix-specific, so it applies as-is:
           patch('deps/uv/src/unix/fs.c',
-                textwrap.dedent("""\
-                    #ifdef FICLONE
+                textwrap.dedent("""\                    #ifdef FICLONE
                       if (req->flags & UV_FS_COPYFILE_FICLONE ||
                           req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {"""),
-                textwrap.dedent("""\
-                    #ifndef __ANDROID__
+                textwrap.dedent("""\                    #ifndef __ANDROID__
                     #ifdef FICLONE
                       if (req->flags & UV_FS_COPYFILE_FICLONE ||
                           req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {"""))
 
-          # FIX for: use of undeclared identifier 'aligned_alloc' when compiling
-          # test/cctest/test_crypto_clienthello.cc with the NDK toolchain (Bionic's
-          # aligned_alloc requires _ISOC11_SOURCE or API level >= 29, which is not
-          # guaranteed by the MIN_API=24 baseline). Use posix_memalign instead,
-          # which is available since API 18 and is the NDK-recommended portable API.
-          # Confirmed against Node v24.x (2026-07-17).
           patch('test/cctest/test_crypto_clienthello.cc',
                 "    alloc_base = static_cast<uint8_t*>(aligned_alloc(page, 2 * page));",
                 "    CHECK_EQ(posix_memalign(reinterpret_cast<void**>(&alloc_base), page, 2 * page), 0);")
 
-          # FIX for: std::atomic_ref is not available in NDK r27c's libc++ for Android
-          # targets (no member named 'atomic_ref' in namespace 'std'). V8 in Node.js
-          # v26.x uses it in deps/v8/src/base/atomicops.h, memcopy.h, AND
-          # deps/v8/include/cppgc/allocation.h — the first two happen to include
-          # each other, but the third only includes v8config.h. Rather than patching
-          # each file individually as new ones crop up during compilation, add the
-          # polyfill to deps/v8/include/v8config.h which EVERY V8 header includes.
-          # Keep the memcopy.h direct-__atomic_store_n patch below (it's cleaner
-          # for that specific callsite); remove the old atomicops.h polyfill since
-          # v8config.h is always included first.
+          fc = pathlib.Path('deps/uv/src/unix/fs.c')
+          s = fc.read_text()
+          oc = '\n'.join(['    goto out;','  }','#endif','','  bytes_to_send = src_statsbuf.st_size;'])
+          nc = '\n'.join(['    goto out;','  }','#endif','#endif','','  bytes_to_send = src_statsbuf.st_size;'])
+          if oc not in s:
+              print("::warning::FICLONE #endif close not found")
+          else:
+              fc.write_text(s.replace(oc, nc, 1)); print("closed #ifndef __ANDROID__ in fs.c")
+          PYEOF
+
+      - name: "Patch V8: atomic_ref polyfill + memcopy + wasm-shuffle"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
           v8config_h = pathlib.Path('deps/v8/include/v8config.h')
           s = v8config_h.read_text()
           old_atomic_line = '#include <memory>'
@@ -308,34 +241,38 @@ jobs:
           if old_atomic_line in s:
               s = s.replace(old_atomic_line, new_polyfill_block, 1)
               v8config_h.write_text(s)
-              print("patched deps/v8/include/v8config.h (std::atomic_ref polyfill)")
+              print("patched v8config.h (std::atomic_ref polyfill)")
           else:
               print("::warning::could not find '#include <memory>' in v8config.h")
 
-          # FIX for: std::atomic_ref used in deps/v8/src/base/memcopy.h (Relaxed_Memset)
-          # which does NOT include atomicops.h — its own #include <atomic> won't pick
-          # up the polyfill above. Use __atomic_store_n directly on the integral type T
-          # (guaranteed by the `requires std::is_integral_v<T>` constraint).
           patch('deps/v8/src/base/memcopy.h',
                 '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
                 '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
 
-          # FIX for: alias template 'ShuffleArray' requires template arguments in
-          # C++20 mode with NDK's clang (argument deduction only allowed for class
-          # templates, not alias templates). Add explicit <kSimd128Size> (the
-          # constant is already used on the next line).
           patch('deps/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc',
                 '    wasm::SimdShuffle::ShuffleArray shuffle_bytes;',
                 '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
+          PYEOF
 
-          # FIX for: undefined symbol android_getCpuFeatures at link time (zlib's
-          # cpu_features.c uses the NDK cpufeatures library which is not compiled in
-          # the gyp build).  Switch to getauxval(AT_HWCAP) which is available in
-          # bionic and is what the existing Linux ARM64 code path already uses.
-          # Apply as three coordinated string replacements on the same file.
+      - name: "Patch V8: zlib cpu_features (getauxval replacement)"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
           zlib_c = pathlib.Path('deps/zlib/cpu_features.c')
           s = zlib_c.read_text()
-          # 1. Merge Android include block into Linux include block
           old_incl = (
               '#if defined(ARMV8_OS_ANDROID)\n'
               '#include <cpu-features.h>\n'
@@ -347,11 +284,10 @@ jobs:
               '#include <asm/hwcap.h>\n'
               '#include <sys/auxv.h>')
           if old_incl in s:
-              s = s.replace(old_incl, new_incl, 1)
-              print("patched deps/zlib/cpu_features.c (includes)")
+              s = s.replace(old_incl, new_incl, 1); print("patched cpu_features.c (includes)")
           else:
-              print("::warning::could not find Android/Linux include block in cpu_features.c")
-          # 2. Replace aarch64 Android branch (uses #if, not #elif)
+              print("::warning::include block not found")
+
           old_aarch64 = (
               '#if defined(ARMV8_OS_ANDROID) && defined(__aarch64__)\n'
               '    uint64_t features = android_getCpuFeatures();\n'
@@ -363,11 +299,10 @@ jobs:
               '    arm_cpu_enable_crc32 = !!(features & HWCAP_CRC32);\n'
               '    arm_cpu_enable_pmull = !!(features & HWCAP_PMULL);')
           if old_aarch64 in s:
-              s = s.replace(old_aarch64, new_aarch64, 1)
-              print("patched deps/zlib/cpu_features.c (aarch64)")
+              s = s.replace(old_aarch64, new_aarch64, 1); print("patched cpu_features.c (aarch64)")
           else:
-              print("::warning::could not find Android aarch64 branch in cpu_features.c")
-          # 3. Replace aarch32 Android branch (uses #elif)
+              print("::warning::aarch64 branch not found")
+
           old_aarch32 = (
               '#elif defined(ARMV8_OS_ANDROID) /* aarch32 */\n'
               '    uint64_t features = android_getCpuFeatures();\n'
@@ -379,44 +314,29 @@ jobs:
               '    arm_cpu_enable_crc32 = !!(features & HWCAP2_CRC32);\n'
               '    arm_cpu_enable_pmull = !!(features & HWCAP2_PMULL);')
           if old_aarch32 in s:
-              s = s.replace(old_aarch32, new_aarch32, 1)
-              print("patched deps/zlib/cpu_features.c (aarch32)")
+              s = s.replace(old_aarch32, new_aarch32, 1); print("patched cpu_features.c (aarch32)")
           else:
-              print("::warning::could not find Android aarch32 branch in cpu_features.c")
+              print("::warning::aarch32 branch not found")
           zlib_c.write_text(s)
+          PYEOF
 
-          # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
-          # matching #endif before the existing #endif that closes the #ifdef FICLONE
-          # block. Run as a second, explicit pass (not folded into the patch() call
-          # above) because the insertion point is identified by different surrounding
-          # context than the opening edit, and doing it as one replace() would require
-          # matching a very long span between the two edit points for uniqueness.
-          fs_c = pathlib.Path('deps/uv/src/unix/fs.c')
-          s = fs_c.read_text()
-          old_close = '\n'.join([
-              '    goto out;',
-              '  }',
-              '#endif',
-              '',
-              '  bytes_to_send = src_statsbuf.st_size;',
-          ])
-          new_close = '\n'.join([
-              '    goto out;',
-              '  }',
-              '#endif',
-              '#endif',
-              '',
-              '  bytes_to_send = src_statsbuf.st_size;',
-          ])
-          if old_close not in s:
-              print("::warning::context not found for FICLONE #endif close in deps/uv/src/unix/fs.c (maybe already fixed upstream, or the #ifdef FICLONE opening patch above didn't apply — check for a mismatched #ifndef/#endif pair before the build step)")
-          else:
-              fs_c.write_text(s.replace(old_close, new_close, 1))
-              print("closed #ifndef __ANDROID__ block in deps/uv/src/unix/fs.c")
+      - name: "Patch V8: gyp toolchain + Yuu-DevID patches"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
 
-          # ---- Termux ported patches (from nodejs/node#57748 / termux-packages) ----
-
-          # 1. v8.gyp: add -latomic for Android + add platform-linux.h source
           patch('tools/v8_gypfiles/v8.gyp',
                 "        ['(OS==\"linux\" and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {",
                 "        ['((OS==\"linux\" or OS==\"android\") and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {")
@@ -424,93 +344,55 @@ jobs:
                 "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',",
                 "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',\n"
                 "            '<(V8_ROOT)/src/base/platform/platform-linux.h',")
-
-          # 2. node.gyp: add -latomic for Android
           patch('node.gyp',
                 "      ['OS==\"linux\" and clang==1', {",
                 "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
-
-          # 3. toolchain.gypi: v8_android_log_stdout=1 + remove branch-protection
           patch('tools/v8_gypfiles/toolchain.gypi',
-                "    'v8_android_log_stdout%': 0,",
-                "    'v8_android_log_stdout%': 1,")
+                "    'v8_android_log_stdout%': 0,", "    'v8_android_log_stdout%': 1,")
           v8_tc = pathlib.Path('tools/v8_gypfiles/toolchain.gypi')
           s = v8_tc.read_text()
-          bp_block = (
-              "        ['v8_control_flow_integrity==1', {\n"
-              "            'cflags': [ '-mbranch-protection=standard' ],\n"
-              "          }],")
+          bp_block = ("        ['v8_control_flow_integrity==1', {\n"
+                      "            'cflags': [ '-mbranch-protection=standard' ],\n"
+                      "          }],")
           if bp_block in s:
               s = s.replace(bp_block, "          # removed for Android (NDK r29 doesn't support this)")
-              v8_tc.write_text(s)
-              print("patched tools/v8_gypfiles/toolchain.gypi (removed branch-protection)")
+              v8_tc.write_text(s); print("patched toolchain.gypi (removed branch-protection)")
           else:
-              print("::warning::branch-protection block not found in toolchain.gypi")
-
-          # 4. common.gypi: remove cpufeatures include (we use getauxval in zlib now)
+              print("::warning::branch-protection block not found")
           patch('common.gypi',
                 "          ['OS == \"android\"', {\n"
                 "            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],\n"
                 "            'ldflags': [ '-fPIC' ]\n"
-                "          }],",
-                "")
-
-          # 5. ninja.py: fix SHARED_INTERMEDIATE_DIR to separate host/target obj dirs.
-          # Without this, host and target builds write into the same obj/ tree,
-          # causing source-file collisions when cross-compiling for a different arch
-          # (e.g., x64 host + arm target). This is the root cause of the
-          # push_registers_asm.cc x64-on-arm error (nodejs/node#58975).
+                "          }],", "")
           patch('tools/gyp/pylib/gyp/generator/ninja.py',
                 "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/gen\",",
                 "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/$|OBJ/gen\",")
           ninja_py = pathlib.Path('tools/gyp/pylib/gyp/generator/ninja.py')
           s = ninja_py.read_text()
-          obj_var_block = (
-              "        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
-              "\n"
-              "        return path")
-          obj_var_new = (
-              "        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
-              "\n"
-              "        obj = \"obj\"\n"
-              "        if self.toolset != \"target\":\n"
-              "            obj += \".\" + self.toolset\n"
-              "        path = path.replace(\"$|OBJ\", obj)\n"
-              "\n"
-              "        return path")
+          obj_var_block = ("        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+                           "\n        return path")
+          obj_var_new = ("        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+                         "\n        obj = \"obj\"\n"
+                         "        if self.toolset != \"target\":\n"
+                         "            obj += \".\" + self.toolset\n"
+                         "        path = path.replace(\"$|OBJ\", obj)\n"
+                         "\n        return path")
           if obj_var_block in s:
               s = s.replace(obj_var_block, obj_var_new, 1)
-              ninja_py.write_text(s)
-              print("patched tools/gyp/pylib/gyp/generator/ninja.py (OBJ variable)")
+              ninja_py.write_text(s); print("patched ninja.py (OBJ variable)")
           else:
-              print("::warning::could not find ExpandSpecial return in ninja.py")
-
-          # 6. uvwasi: enable WASI readdir on Android (works fine, upstream guard
-          # was conservative). Source: Termux's nodejs-lts packaging.
+              print("::warning::ExpandSpecial return not found in ninja.py")
           patch('deps/uvwasi/src/uvwasi.c',
                 '#if !defined(_WIN32) && !defined(__ANDROID__)',
                 '#if !defined(_WIN32)')
-
-          # ---- Patches from Yuu-DevID/build-nodejs-for-android ----
-
-          # 7. v8config.h: allow x64 host for ARM target build (original only allows
-          # arm/ia32 host). Without this, configure's host-vs-target sanity check
-          # rejects x86_64 → arm cross-compilation.
           patch('deps/v8/include/v8config.h',
                 '#if (V8_TARGET_ARCH_ARM && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM))\n'
                 '#error Target architecture arm is only supported on arm and ia32 host',
                 '#if (V8_TARGET_ARCH_ARM && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM || V8_HOST_ARCH_X64))\n'
                 '#error Target architecture arm is only supported on arm, ia32, and x64 host')
-
-          # 8. globals.h: relax static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES)
-          # for cross-compilation. Host tools (x86_64) have kTaggedSize=8 but
-          # TAGGED_SIZE_8_BYTES=false when target is 32-bit ARM.
           patch('deps/v8/src/common/globals.h',
                 'static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);',
-                '// static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);  // relaxed for cross-compile')
-
-          # 9. builtins-iterator-inl.h: GCC/Clang evaluates static_assert in
-          # discarded if constexpr branches. Replace with if constexpr condition.
+                '// static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);')
           patch('deps/v8/src/builtins/builtins-iterator-inl.h',
                 '        } else {                                                            \\'
                 '          static_assert(std::numeric_limits<ctype>::max() <=                \\'
@@ -523,56 +405,36 @@ jobs:
                 '                             std::numeric_limits<ctype>::min() >=           \\'
                 '                             std::numeric_limits<int>::min()) {             \\'
                 '          if (!int_visitor(static_cast<int>(val))) {')
-
-          # 10. wasm-objects.h / number-string-cache.h / js-dispatch-table.h:
-          # relax alignment/size static_assert failures for 32-bit cross-build.
-          # Host tools (x64, kTaggedSize=8) vs target (arm, 4-byte tagged) mismatch.
-          patch_dest_cpu = '${{ matrix.dest_cpu }}'
-          if patch_dest_cpu == 'arm':
-              print("applying 32-bit cross-compile assertion relaxations...")
-              wasm_objects = pathlib.Path('deps/v8/src/wasm/wasm-objects.h')
-              if wasm_objects.exists():
-                  s = wasm_objects.read_text()
-                  for assert_str in [
-                      '  static_assert(IsAligned(kProtectedOffheapDataOffset, kTaggedSize));',
-                      '  static_assert(IsAligned(kEntriesOffset, kTaggedSize));',
-                      '  static_assert(IsAligned(kEntrySize, kTaggedSize));',
-                      '  static_assert(IsAligned(kImplicitArgBias, kTaggedSize));',
-                  ]:
-                      if assert_str in s:
-                          s = s.replace(assert_str, f'  // {assert_str.strip()}  // relaxed for cross-compile')
-                          print(f"  relaxed {assert_str.strip()}")
-                  wasm_objects.write_text(s)
-
-              nsc_path = pathlib.Path('deps/v8/src/objects/number-string-cache.h')
-              if nsc_path.exists():
-                  s = nsc_path.read_text()
-                  old_nsc = 'static_assert(DoubleStringCache::SizeFor'
-                  if old_nsc in s:
-                      s = s.replace('static_assert(DoubleStringCache::SizeFor',
-                                    '// static_assert(DoubleStringCache::SizeFor  // relaxed')
-                      nsc_path.write_text(s)
-                      print("  relaxed number-string-cache.h static_assert")
-
-              jsdt_path = pathlib.Path('deps/v8/src/sandbox/js-dispatch-table.h')
-              if jsdt_path.exists():
-                  s = jsdt_path.read_text()
-                  old_jsdt = 'static_assert(sizeof(JSDispatchEntry) == kJSDispatchTableEntrySize);'
-                  if old_jsdt in s:
-                      s = s.replace(old_jsdt, '// static_assert(sizeof(JSDispatchEntry) == kJSDispatchTableEntrySize);  // relaxed for cross-compile')
-                      jsdt_path.write_text(s)
-                      print("  relaxed js-dispatch-table.h static_assert")
+          if '${{ matrix.dest_cpu }}' == 'arm':
+              print("applying 32-bit assertion relaxations...")
+              for p, asserts in [
+                  ('deps/v8/src/wasm/wasm-objects.h',
+                   ['  static_assert(IsAligned(kProtectedOffheapDataOffset, kTaggedSize));',
+                    '  static_assert(IsAligned(kEntriesOffset, kTaggedSize));',
+                    '  static_assert(IsAligned(kEntrySize, kTaggedSize));',
+                    '  static_assert(IsAligned(kImplicitArgBias, kTaggedSize));']),
+                  ('deps/v8/src/objects/number-string-cache.h',
+                   ['static_assert(DoubleStringCache::SizeFor']),
+                  ('deps/v8/src/sandbox/js-dispatch-table.h',
+                   ['static_assert(sizeof(JSDispatchEntry) == kJSDispatchTableEntrySize);']),
+              ]:
+                  fp = pathlib.Path(p)
+                  if fp.exists():
+                      t = fp.read_text()
+                      for a in asserts:
+                          if a in t:
+                              t = t.replace(a, f'// {a.lstrip()}  // relaxed for cross-compile')
+                      fp.write_text(t); print(f"  relaxed {p}")
+                  else:
+                      print(f"  ::warning::{p} not found")
           else:
-              print("skipping 32-bit-specific assertion relaxations (target is 64-bit)")
+              print("skipping 32-bit assertion relaxations")
           PYEOF
 
-          echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
+          echo "Skipped from Termux's patch set (not applicable to generic NDK cross-build):"
           echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
-          echo "    swap /data/local/tmp for a literal @TERMUX_PREFIX@/tmp placeholder. Not"
-          echo "    applicable outside Termux's own install layout; /data/local/tmp is correct here."
-          echo "  - deps-uv-src-unix-process.c.patch: strips post-fork setuid/setgid/setgroups"
-          echo "    privilege-drop calls for Termux's unprivileged userland. Not a cross-compile"
-          echo "    concern and not applicable here."
+          echo "    swap /data/local/tmp for @TERMUX_PREFIX@/tmp placeholder."
+          echo "  - deps-uv-src-unix-process.c.patch: strips post-fork privilege-drop calls."
 
       # ---------- 4. Cross-compile ----------
       - name: Cross-compile Node.js for ${{ matrix.abi }}
