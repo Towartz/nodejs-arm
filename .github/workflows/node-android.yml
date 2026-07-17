@@ -438,7 +438,10 @@ jobs:
 
           # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
           # in some configurations, silently breaking host-tool linking).
-          make -j"$(nproc)" CC.host=gcc CXX.host=g++ LINK.host=g++ AR.host=ar
+          # Build ONLY the 'node' target: produces both out/Release/node (CLI)
+          # and out/Release/lib.target/libnode.so (shared library). Skip cctest
+          # and other test/auxiliary targets to save 5-10 minutes of build time.
+          make -j"$(nproc)" node CC.host=gcc CXX.host=g++ LINK.host=g++ AR.host=ar
 
       # ---------- 5. Rename, strip, package ----------
       - name: Package lib${{ env.LIB_NAME }}.so + node
