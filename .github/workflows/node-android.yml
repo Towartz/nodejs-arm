@@ -12,10 +12,10 @@ on:
       node_version:
         description: 'Node.js version to build'
         type: choice
-        default: 'v24.x'
+        default: 'v26.x'
         options:
-          - 'v24.x'       # LTS (Krypton)
           - 'v26.x'       # Latest release line
+          - 'v24.x'       # LTS (Krypton)
           - 'custom'
       custom_ref:
         description: 'Custom git ref — only used when "custom" is selected'
@@ -35,7 +35,7 @@ on:
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 env:
-  NDK_VERSION: 'r27c'
+  NDK_VERSION: 'r29'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -64,7 +64,7 @@ jobs:
       # ---------- 0. Resolve inputs ----------
       - name: Resolve inputs
         run: |
-          REQ="${{ inputs.node_version || 'v24.x' }}"
+          REQ="${{ inputs.node_version || 'v26.x' }}"
           if [ "$REQ" = "custom" ]; then REQ="${{ inputs.custom_ref }}"; fi
           test -n "$REQ" || { echo "::error::custom_ref is empty"; exit 1; }
           echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
