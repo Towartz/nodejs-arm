@@ -302,6 +302,44 @@ jobs:
                 "    alloc_base = static_cast<uint8_t*>(aligned_alloc(page, 2 * page));",
                 "    CHECK_EQ(posix_memalign(reinterpret_cast<void**>(&alloc_base), page, 2 * page), 0);")
 
+          # FIX for: std::atomic_ref is not available in NDK r27c's libc++ for Android
+          # targets (no member named 'atomic_ref' in namespace 'std'). V8 in Node.js
+          # v26.x uses it extensively in deps/v8/src/base/atomicops.h via the
+          # tracing-controller.cc compilation path. Provide a minimal polyfill using
+          # __atomic_* GCC/Clang builtins which are always available on Android.
+          # Verified against Node v26.x (2026-07-17).
+          patch('deps/v8/src/base/atomicops.h',
+                '#include <atomic>',
+                '#include <atomic>\n'
+                '#if defined(__ANDROID__) && !defined(__cpp_lib_atomic_ref)\n'
+                'namespace std {\n'
+                'template <typename T>\n'
+                'struct atomic_ref {\n'
+                '  explicit atomic_ref(T& obj) : ptr_(&obj) {}\n'
+                '  void store(T val, memory_order order = memory_order_seq_cst) const {\n'
+                '    __atomic_store_n(ptr_, val, order); }\n'
+                '  T load(memory_order order = memory_order_seq_cst) const {\n'
+                '    return __atomic_load_n(ptr_, order); }\n'
+                '  T exchange(T val, memory_order order = memory_order_seq_cst) const {\n'
+                '    return __atomic_exchange_n(ptr_, val, order); }\n'
+                '  bool compare_exchange_strong(T& expected, T desired,\n'
+                '      memory_order success, memory_order failure) const {\n'
+                '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+                '                                       false, success, failure); }\n'
+                '  bool compare_exchange_strong(T& expected, T desired,\n'
+                '      memory_order order = memory_order_seq_cst) const {\n'
+                '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+                '                                       false, order, order); }\n'
+                '  T fetch_add(T val, memory_order order = memory_order_seq_cst) const {\n'
+                '    return __atomic_fetch_add(ptr_, val, order); }\n'
+                '  T fetch_or(T val, memory_order order = memory_order_seq_cst) const {\n'
+                '    return __atomic_fetch_or(ptr_, val, order); }\n'
+                'private:\n'
+                '  T* ptr_;\n'
+                '};\n'
+                '}  // namespace std\n'
+                '#endif')
+
           # The FICLONE patch above opened an #ifndef __ANDROID__ block that needs a
           # matching #endif before the existing #endif that closes the #ifdef FICLONE
           # block. Run as a second, explicit pass (not folded into the patch() call
