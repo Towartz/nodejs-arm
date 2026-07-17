@@ -577,8 +577,31 @@ jobs:
         run: |
           TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           LIB="lib${LIB_NAME}.so"
-          "$TC/bin/llvm-readelf" -h out/Release/lib.target/libnode.so | grep -E 'Class|Machine|Type'
-          cp out/Release/lib.target/libnode.so "$LIB"
+
+          # Diagnostic: confirm where libnode.so actually landed. On this NDK/Node
+          # combo the .so has been seen to land outside out/Release/lib.target
+          # (e.g. straight under out/Release, or under obj.target) depending on
+          # gyp's generator config, so search instead of hardcoding one path.
+          echo "Searching for libnode.so in out/Release..."
+          find out/Release -name "libnode.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
+          echo "Directory structure under out/Release:"
+          find out/Release -maxdepth 3 -type d
+
+          if [ -f "out/Release/lib.target/libnode.so" ]; then
+            LIB_PATH="out/Release/lib.target/libnode.so"
+          elif [ -f "out/Release/libnode.so" ]; then
+            echo "Found at out/Release/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/libnode.so"
+          elif [ -f "out/Release/obj.target/libnode.so" ]; then
+            echo "Found at out/Release/obj.target/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/obj.target/libnode.so"
+          else
+            echo "::error::libnode.so not found in any expected location"
+            exit 1
+          fi
+
+          "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
+          cp "$LIB_PATH" "$LIB"
           cp out/Release/node node
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
           "$TC/bin/llvm-strip" --strip-all node
