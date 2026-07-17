@@ -141,10 +141,6 @@ jobs:
                 '#endif\n\n'
                 '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"')
 
-          patch('deps/v8/src/base/small-vector.h',
-                '  ASSERT_TRIVIALLY_COPYABLE(T);',
-                '  // ASSERT_TRIVIALLY_COPYABLE(T);')
-
           th = pathlib.Path('deps/v8/src/trap-handler/trap-handler.h')
           c = th.read_text()
           ms = '// X64 on Linux, Windows, MacOS, FreeBSD.'
@@ -393,17 +389,38 @@ jobs:
                 'static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);',
                 '// static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);')
           patch('deps/v8/src/builtins/builtins-iterator-inl.h',
-                '        } else {                                                            \\'
-                '          static_assert(std::numeric_limits<ctype>::max() <=                \\'
-                '                        std::numeric_limits<int>::max());                   \\'
-                '          static_assert(std::numeric_limits<ctype>::min() >=                \\'
-                '                        std::numeric_limits<int>::min());                   \\'
-                '          if (!int_visitor(static_cast<int>(val))) {',
-                '        } else if constexpr (std::numeric_limits<ctype>::max() <=           \\'
-                '                             std::numeric_limits<int>::max() &&             \\'
-                '                             std::numeric_limits<ctype>::min() >=           \\'
-                '                             std::numeric_limits<int>::min()) {             \\'
-                '          if (!int_visitor(static_cast<int>(val))) {')
+                '        } else {                                                            \
+'
+                '          static_assert(std::numeric_limits<ctype>::max() <=                \
+'
+                '                        std::numeric_limits<int>::max());                   \
+'
+                '          static_assert(std::numeric_limits<ctype>::min() >=                \
+'
+                '                        std::numeric_limits<int>::min());                   \
+'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \
+'
+                '            return MaybeDirectHandle<Object>();                             \
+'
+                '          }                                                                 \
+'
+                '        }',
+                '        } else if constexpr (std::numeric_limits<ctype>::max() <=           \
+'
+                '                             std::numeric_limits<int>::max() &&             \
+'
+                '                             std::numeric_limits<ctype>::min() >=           \
+'
+                '                             std::numeric_limits<int>::min()) {             \
+'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \
+'
+                '            return MaybeDirectHandle<Object>();                             \
+'
+                '          }                                                                 \
+'
+                '        }')
           if '${{ matrix.dest_cpu }}' == 'arm':
               print("applying 32-bit assertion relaxations...")
               for p, asserts in [
