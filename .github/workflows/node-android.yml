@@ -304,41 +304,56 @@ jobs:
 
           # FIX for: std::atomic_ref is not available in NDK r27c's libc++ for Android
           # targets (no member named 'atomic_ref' in namespace 'std'). V8 in Node.js
-          # v26.x uses it extensively in deps/v8/src/base/atomicops.h via the
-          # tracing-controller.cc compilation path. Provide a minimal polyfill using
-          # __atomic_* GCC/Clang builtins which are always available on Android.
-          # Verified against Node v26.x (2026-07-17).
-          patch('deps/v8/src/base/atomicops.h',
-                '#include <atomic>',
-                '#include <atomic>\n'
-                '#if defined(__ANDROID__) && !defined(__cpp_lib_atomic_ref)\n'
-                'namespace std {\n'
-                'template <typename T>\n'
-                'struct atomic_ref {\n'
-                '  explicit atomic_ref(T& obj) : ptr_(&obj) {}\n'
-                '  void store(T val, memory_order order = memory_order_seq_cst) const {\n'
-                '    __atomic_store_n(ptr_, val, static_cast<int>(order)); }\n'
-                '  T load(memory_order order = memory_order_seq_cst) const {\n'
-                '    return __atomic_load_n(ptr_, static_cast<int>(order)); }\n'
-                '  T exchange(T val, memory_order order = memory_order_seq_cst) const {\n'
-                '    return __atomic_exchange_n(ptr_, val, static_cast<int>(order)); }\n'
-                '  bool compare_exchange_strong(T& expected, T desired,\n'
-                '      memory_order success, memory_order failure) const {\n'
-                '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
-                '                                       false, static_cast<int>(success), static_cast<int>(failure)); }\n'
-                '  bool compare_exchange_strong(T& expected, T desired,\n'
-                '      memory_order order = memory_order_seq_cst) const {\n'
-                '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
-                '                                       false, static_cast<int>(order), static_cast<int>(order)); }\n'
-                '  T fetch_add(T val, memory_order order = memory_order_seq_cst) const {\n'
-                '    return __atomic_fetch_add(ptr_, val, static_cast<int>(order)); }\n'
-                '  T fetch_or(T val, memory_order order = memory_order_seq_cst) const {\n'
-                '    return __atomic_fetch_or(ptr_, val, static_cast<int>(order)); }\n'
-                'private:\n'
-                '  T* ptr_;\n'
-                '};\n'
-                '}  // namespace std\n'
-                '#endif')
+          # v26.x uses it in deps/v8/src/base/atomicops.h, memcopy.h, AND
+          # deps/v8/include/cppgc/allocation.h — the first two happen to include
+          # each other, but the third only includes v8config.h. Rather than patching
+          # each file individually as new ones crop up during compilation, add the
+          # polyfill to deps/v8/include/v8config.h which EVERY V8 header includes.
+          # Keep the memcopy.h direct-__atomic_store_n patch below (it's cleaner
+          # for that specific callsite); remove the old atomicops.h polyfill since
+          # v8config.h is always included first.
+          v8config_h = pathlib.Path('deps/v8/include/v8config.h')
+          s = v8config_h.read_text()
+          old_atomic_line = '#include <memory>'
+          new_polyfill_block = (
+              '#include <memory>\n'
+              '#if defined(__ANDROID__) && !defined(__cpp_lib_atomic_ref)\n'
+              '#ifndef V8_STD_ATOMIC_REF_POLYFILL\n'
+              '#define V8_STD_ATOMIC_REF_POLYFILL\n'
+              'namespace std {\n'
+              'template <typename T>\n'
+              'struct atomic_ref {\n'
+              '  explicit atomic_ref(T& obj) : ptr_(&obj) {}\n'
+              '  void store(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    __atomic_store_n(ptr_, val, static_cast<int>(order)); }\n'
+              '  T load(memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_load_n(ptr_, static_cast<int>(order)); }\n'
+              '  T exchange(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_exchange_n(ptr_, val, static_cast<int>(order)); }\n'
+              '  bool compare_exchange_strong(T& expected, T desired,\n'
+              '      memory_order success, memory_order failure) const {\n'
+              '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+              '                                       false, static_cast<int>(success), static_cast<int>(failure)); }\n'
+              '  bool compare_exchange_strong(T& expected, T desired,\n'
+              '      memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+              '                                       false, static_cast<int>(order), static_cast<int>(order)); }\n'
+              '  T fetch_add(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_fetch_add(ptr_, val, static_cast<int>(order)); }\n'
+              '  T fetch_or(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_fetch_or(ptr_, val, static_cast<int>(order)); }\n'
+              'private:\n'
+              '  T* ptr_;\n'
+              '};\n'
+              '}  // namespace std\n'
+              '#endif\n'
+              '#endif')
+          if old_atomic_line in s:
+              s = s.replace(old_atomic_line, new_polyfill_block, 1)
+              v8config_h.write_text(s)
+              print("patched deps/v8/include/v8config.h (std::atomic_ref polyfill)")
+          else:
+              print("::warning::could not find '#include <memory>' in v8config.h")
 
           # FIX for: std::atomic_ref used in deps/v8/src/base/memcopy.h (Relaxed_Memset)
           # which does NOT include atomicops.h — its own #include <atomic> won't pick
