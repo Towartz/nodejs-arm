@@ -425,6 +425,12 @@ jobs:
             size)  EXTRA_FLAGS="--v8-lite-mode" ;;
           esac
 
+          # --without-corepack was removed in Node.js v26.x
+          NODEEXTRA=""
+          if ./configure --help 2>&1 | grep -q without-corepack; then
+            NODEEXTRA="--without-corepack"
+          fi
+
           ./configure \
             --cross-compiling \
             --dest-os=android \
@@ -432,7 +438,7 @@ jobs:
             --shared \
             --with-intl=none \
             --without-npm \
-            --without-corepack \
+            $NODEEXTRA \
             --openssl-no-asm \
             $EXTRA_FLAGS
 
