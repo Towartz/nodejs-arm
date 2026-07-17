@@ -78,11 +78,33 @@ jobs:
 
       # ---------- 0b. Ensure an older NDK is present (Clang 21 in r29 breaks V8) ----------
       # Belt-and-braces: don't rely on the runner image happening to have r27/r28
-      # cached. sdkmanager is already on PATH on GitHub's Android-preinstalled
-      # runners; this is a no-op (fast) if the version is already present.
+      # cached. sdkmanager is NOT on PATH by default on these runners — only
+      # ANDROID_NDK_HOME/ANDROID_SDK_ROOT env vars are pre-set. The binary lives
+      # under $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager (confirmed
+      # against actions/runner-images' own install script). Resolve it explicitly
+      # rather than assume PATH — this step is a no-op (fast) if the version is
+      # already cached on the runner.
       - name: Ensure NDK 27.2.12479018 is installed (Clang predates turboshaft break)
         run: |
-          yes | sdkmanager --install "ndk;27.2.12479018" --sdk_root="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" \
+          SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            # Fall back to a PATH search in case the runner image layout differs
+            # from what's documented today (images do change over time).
+            if command -v sdkmanager >/dev/null 2>&1; then
+              SDKMANAGER="$(command -v sdkmanager)"
+            else
+              echo "::warning::sdkmanager not found at $SDKMANAGER or on PATH."
+              echo "::warning::ANDROID_SDK_ROOT=$SDK_ROOT — listing cmdline-tools for debugging:"
+              find "$SDK_ROOT/cmdline-tools" -maxdepth 2 2>/dev/null || echo "  (cmdline-tools dir not found)"
+              echo "::warning::Step 1 below will fall back to r29's Clang if no older NDK is found."
+              exit 0
+            fi
+          fi
+
+          echo "Using sdkmanager at $SDKMANAGER"
+          yes | "$SDKMANAGER" --install "ndk;27.2.12479018" --sdk_root="$SDK_ROOT" \
             || echo "::warning::sdkmanager install failed; step 1 below will fall back to r29's Clang if no older NDK is found"
 
       # ---------- 1. Android NDK ----------
