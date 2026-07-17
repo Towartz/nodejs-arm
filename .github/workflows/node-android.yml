@@ -315,7 +315,7 @@ jobs:
           zlib_c.write_text(s)
           PYEOF
 
-      - name: "Patch V8: gyp toolchain + Yuu-DevID patches"
+      - name: "Patch V8: gyp toolchain + cross-compile config"
         working-directory: node
         run: |
           python3 - <<'PYEOF'
