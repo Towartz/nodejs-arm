@@ -611,8 +611,11 @@ jobs:
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
           # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc needs x64.
+          # -fpermissive: Clang 17 C++20 two-phase lookup is too strict for V8's CRTP
+          # patterns (names from dependent bases used in macro expansions). GCC/clang's
+          # -fpermissive downgrades these to warnings — the resulting code is valid.
           HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
-          make -j"$(nproc)" node CC.host="gcc $HOST_M64" CXX.host="g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
+          make -j"$(nproc)" node CC.host="gcc $HOST_M64" CXX.host="g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar CXXFLAGS="-fpermissive"
 
       # ---------- 5. Rename, strip, package ----------
       - name: Package lib${{ env.LIB_NAME }}.so + node
