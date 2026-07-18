@@ -1,6 +1,16 @@
 <div align="center">
-  <h1>Node.js for Android ARM</h1>
-  <p>Cross-compiled <code>libnode.so</code> + <code>node</code> CLI for Android ARM64/ARM32</p>
+
+# Node.js for Android ARM
+
+[![Build](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=build&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
+[![NDK](https://img.shields.io/badge/NDK-r26d(Clang%2017)-blue?logo=android)](https://developer.android.com/ndk)
+[![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
+[![Node](https://img.shields.io/badge/Node-v26.x-339933?logo=nodedotjs)](https://nodejs.org)
+[![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
+[![Views](https://hits.sh/github.com/Towartz/nodejs-arm.svg?label=views&color=555)](https://hits.sh/github.com/Towartz/nodejs-arm/)
+
+Cross-compiled `libnode.so` + `node` CLI for Android ARM64 / ARM32 via GitHub Actions.
+
 </div>
 
 ## Builds
