@@ -421,7 +421,25 @@ jobs:
           assembler_h = pathlib.Path('deps/v8/src/compiler/turboshaft/assembler.h')
           if assembler_h.exists():
               s = assembler_h.read_text()
-              
+
+              # FIX: Clang 18+ (NDK r27c+) fails to resolve 'resolve' in macro
+              # definitions within AssemblerOpInterface (CRTP name-lookup regression).
+              # 'this->' makes the name dependent, fixing Clang's lookup.
+              lines = s.split('\n')
+              result = []
+              in_macro = False
+              for line in lines:
+                  stripped = line.rstrip()
+                  if stripped.startswith('#define '):
+                      in_macro = True
+                  if in_macro and 'resolve(' in stripped:
+                      stripped = stripped.replace('resolve(', 'this->resolve(')
+                  result.append(stripped)
+                  if in_macro and not stripped.endswith('\\'):
+                      in_macro = False
+              s = '\n'.join(result)
+              print("patched assembler.h (this->resolve in macros)")
+
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro
               old_macro = (
                   '      static_assert(kTaggedSize == kInt32Size);                            \\\n'
@@ -431,7 +449,7 @@ jobs:
                   '      // static_assert(kTaggedSize == kInt32Size);  // relaxed for Android cross-compile \\\n'
                   '      // static_assert(v8::internal::SmiValuesAre31Bits());  // relaxed for Android cross-compile'
               )
-              
+
               if old_macro in s:
                   s = s.replace(old_macro, new_macro, 1)
                   assembler_h.write_text(s)
