@@ -620,6 +620,111 @@ jobs:
               print("::warning::assembler.h not found")
           PYEOF
 
+      # ---------- NEW 2026-07-18 ----------
+      # Root cause of "'v8::internal::compiler::turboshaft::Operation::input_count'
+      # is not a member of class ...WasmWrapperTSGraphBuilder<...>" in
+      # wrappers-inl.h, appearing ~13min into compilation (well after assembler.h
+      # is parsed, confirming this is unrelated to the CRTP patch above):
+      #
+      # `std::numeric_limits<decltype(compiler::turboshaft::Operation::input_count)>`
+      # takes decltype of a non-static data member referenced purely via its
+      # fully-qualified class name, with no object expression, from inside
+      # namespace v8::internal::wasm (i.e. NOT from inside ...::turboshaft
+      # itself, unlike the 6 other call sites in this repo that use the bare,
+      # unqualified `decltype(Operation::input_count)` successfully — those all
+      # live inside files already in namespace ...::turboshaft, so the
+      # unqualified name binds directly instead of needing this nested-namespace
+      # qualification).
+      #
+      # NDK r26d ships Clang 17. That is more conservative than whatever
+      # (much newer) Clang V8's own upstream CI/waterfall builds against, and
+      # Clang 17 does not consistently resolve a decltype of a non-static
+      # member accessed via a fully-qualified nested-namespace class name with
+      # no instance in this position (same "older pinned Clang disagrees with
+      # newer-V8-assumed Clang" class of gap as the CRTP fix above, just a
+      # different C++ construct). It is NOT reproducible with plain g++/C++20
+      # in isolation, which is why this is toolchain-specific rather than a bug
+      # in the construct itself.
+      #
+      # Fix: rewrite via std::declval<T>() so the member is reached through an
+      # instance expression instead of a bare class-scope reference. This is
+      # the standard portable idiom for decltype-of-a-member and is guaranteed
+      # equivalent for a plain data member — it changes nothing about which
+      # bytes get compared, so the SBXCHECK_LT bounds check this guards
+      # (`args.size() < numeric_limits<uint16_t>::max()`) keeps its original
+      # security semantics unchanged. Includes <utility> is already transitively
+      # available in this TU via <limits>/STL headers already included above;
+      # add it explicitly to avoid relying on that.
+      - name: "Patch V8: wrappers-inl.h decltype(Operation::input_count) NDK r26d/Clang 17 fix"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return False
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return False
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+              return True
+
+          wrappers_inl = pathlib.Path('deps/v8/src/wasm/wrappers-inl.h')
+          if wrappers_inl.exists():
+              s = wrappers_inl.read_text()
+
+              # Ensure <utility> is included for std::declval (don't rely on
+              # transitive inclusion via <limits>/other STL headers).
+              incl_anchor = '#include "src/heap/factory-base-inl.h"'
+              if incl_anchor in s and '#include <utility>' not in s:
+                  s = s.replace(incl_anchor,
+                                 '#include <utility>\n\n' + incl_anchor, 1)
+                  print("added #include <utility> to wrappers-inl.h")
+
+              old_check = (
+                  '  SBXCHECK_LT(\n'
+                  '      args.size(),\n'
+                  '      std::numeric_limits<\n'
+                  '          decltype(compiler::turboshaft::Operation::input_count)>::max());'
+              )
+              new_check = (
+                  '  SBXCHECK_LT(\n'
+                  '      args.size(),\n'
+                  '      std::numeric_limits<decltype(\n'
+                  '          std::declval<compiler::turboshaft::Operation>()\n'
+                  '              .input_count)>::max());'
+              )
+              if old_check in s:
+                  s = s.replace(old_check, new_check, 1)
+                  wrappers_inl.write_text(s)
+                  print("patched wrappers-inl.h (SBXCHECK_LT input_count decltype)")
+
+                  # Sanity check: confirm the bare class-scope form is gone and
+                  # the declval form landed exactly once, so a future upstream
+                  # reformatting of this block fails loudly here instead of
+                  # silently no-op'ing (same discipline as the assembler.h step).
+                  s2 = wrappers_inl.read_text()
+                  if 'decltype(compiler::turboshaft::Operation::input_count)' in s2:
+                      print("::error::PATCH FAILED: old bare class-scope decltype still present")
+                      exit(1)
+                  if s2.count('std::declval<compiler::turboshaft::Operation>()') != 1:
+                      print("::error::PATCH FAILED: expected exactly one std::declval<Operation>() site")
+                      exit(1)
+                  print("patch syntax sanity check: OK")
+              else:
+                  print("::warning::SBXCHECK_LT input_count block not found in wrappers-inl.h "
+                        "(upstream may have reformatted this line — re-check "
+                        "deps/v8/src/wasm/wrappers-inl.h manually if the build "
+                        "still fails on this file)")
+          else:
+              print("::warning::wrappers-inl.h not found")
+          PYEOF
+
           echo "Skipped from Termux's patch set (not applicable to generic NDK cross-build):"
           echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
           echo "    swap /data/local/tmp for @TERMUX_PREFIX@/tmp placeholder."
