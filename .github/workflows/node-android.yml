@@ -588,47 +588,42 @@ jobs:
           else:
               fs_c.write_text(s.replace(old_close, new_close, 1))
               print("closed #ifndef __ANDROID__ block in deps/uv/src/unix/fs.c")
-          # FIX for: nodejs/node#58975 — "Incorrect selection of x64
-          # push_registers_asm.cc for host build when target is arm".
-          # The gyp condition for the x64 variant checks
-          # '_toolset=="host" and host_arch=="x64"' without also requiring
-          # target_arch=="x64", so when cross-compiling to ARM on an x64 host,
-          # the x64 source is compiled for the HOST toolset. Combined with the
-          # -m32 CFLAGS_host that V8's gyp build adds for 32-bit targets (and
-          # the -m64 override the workflow applies on top), the resulting x64
-          # inline assembly gets fed to the ARM NDK assembler, which produces
-          # "bad register name `%rbp'" errors. Fix: add 'and target_arch=="x64"'
-          # to the host-side condition so the x64 source is only compiled for
-          # the host during native x64 builds (not cross-compiles). The target-
-          # side condition is unchanged and still matches native x64 builds.
+          # ============================================================
+          # CORRECTION (superseding the v8.gyp patch that used to be here):
           #
-          # IMPORTANT: this exact condition string appears TWICE in v8.gyp —
-          # once inside the OS=="win" block (guards push_registers_masm.asm)
-          # and once inside the OS!="win" block (guards push_registers_asm.cc,
-          # the one that actually breaks this build). Verified by count() on a
-          # fresh v24.x clone: 2 occurrences. The shared patch() helper above
-          # uses replace(old, new, count=1), which only touches the FIRST
-          # match — the Windows one — and silently leaves the non-Windows
-          # condition untouched, so the error keeps happening even though the
-          # step logs "patched tools/v8_gypfiles/v8.gyp" with no warning.
-          # Do NOT use the patch() helper here; replace every occurrence
-          # instead (both are safe to change identically — the added
-          # 'and target_arch == "x64"' is correct for the Windows/MASM
-          # branch too, since that branch has the same host-toolset
-          # cross-compile bug for the same reason).
-          v8_gyp_path = pathlib.Path('tools/v8_gypfiles/v8.gyp')
-          v8_gyp_old = '_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"'
-          v8_gyp_new = '_toolset == "host" and host_arch == "x64" and target_arch == "x64" or _toolset == "target" and target_arch=="x64"'
-          if not v8_gyp_path.exists():
-              print("::warning::file not found tools/v8_gypfiles/v8.gyp (skipping — may be version-specific)")
-          else:
-              v8_gyp_s = v8_gyp_path.read_text()
-              n_occurrences = v8_gyp_s.count(v8_gyp_old)
-              if n_occurrences == 0:
-                  print("::warning::context not found in tools/v8_gypfiles/v8.gyp (maybe already fixed upstream)")
-              else:
-                  v8_gyp_path.write_text(v8_gyp_s.replace(v8_gyp_old, v8_gyp_new))
-                  print(f"patched tools/v8_gypfiles/v8.gyp ({n_occurrences} occurrence(s) replaced — expected 2: one in the OS==win block, one in the OS!=win block)")
+          # The v8.gyp condition
+          #   '_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"'
+          # is NOT a gyp bug. It is intentional: mksnapshot/torque run
+          # natively on the x64 CI runner (the HOST toolset), completely
+          # independent of what dest_cpu/target_arch is being cross-compiled.
+          # So the host side of this condition correctly checks host_arch
+          # only — it has to, because the host binary is x64 regardless of
+          # whether we're building for arm64-v8a or armeabi-v7a. Upstream's
+          # own current v8.gyp (checked against nodejs/node main, 2026-07-19)
+          # still uses this exact "host_arch==X or target_arch==X" pattern
+          # for every architecture branch here, unchanged. Adding
+          # 'and target_arch == "x64"' to the host side (an earlier revision
+          # of this workflow did this, citing nodejs/node#58975) breaks the
+          # arm64-v8a leg: it makes the host side of every one of these
+          # per-arch conditions false when target_arch=="arm64", so NO
+          # source satisfies '_toolset=="host"' at all, and
+          # PushAllRegistersAndIterateStack goes missing from
+          # libv8_base_without_compiler.a for the host toolset — which is
+          # exactly the "undefined symbol: PushAllRegistersAndIterateStack"
+          # mksnapshot linker error. Do not patch this file. The real
+          # armeabi-v7a-only problem is that push_registers_asm.cc for x64
+          # (the file gyp correctly picks for the host toolset, since
+          # host_arch=="x64" on every GH Actions runner) contains raw
+          # 64-bit-register inline asm with no arch #ifdef of its own — so
+          # it must be compiled by a genuinely 64-bit host compiler. If
+          # CFLAGS_host=-m32 (set below, armeabi-v7a only) reaches the
+          # compiler while this file is built, you get "bad register name"
+          # errors regardless of which source gyp selected. That is a
+          # compiler-flag problem, not a source-selection problem — see the
+          # HOST_M64 override in the cross-compile step, and make sure it's
+          # applied consistently (including during ./configure, not just
+          # during make — see the note at that step).
+          # ============================================================
           PYEOF
 
           echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
@@ -684,31 +679,42 @@ jobs:
           export CC_host="ccache gcc"
           export CXX_host="ccache g++"
 
-          # V8 requires 32-bit host tools for 32-bit targets
-          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
-            export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
-            # KNOWN ISSUE (armeabi-v7a only, unconfirmed against this exact repro):
-            # common.gypi unconditionally adds -m64 to host cflags/ldflags when
-            # host_arch=="x64" (which GH Actions runners auto-detect as, regardless
-            # of dest_cpu). Combined with the -m32 above, host tools may see both
-            # -m32 and -m64 on the same command line. Documented by the same
-            # engineer who maintains Termux's Node.js build, in the nodejs/node#57748
-            # PR description; a common.gypi.patch / v8.gyp.patch pair exists in
-            # Termux's packaging (github.com/termux/termux-packages, packages/nodejs-lts)
-            # to make cross-compiling for 32-bit not add -m64 to the host build, but
-            # neither patch is merged upstream as of this writing — fetch and review
-            # them directly from that repo before adopting, rather than trusting a
-            # hand-copied version here. armeabi-v7a is experimental/continue-on-error
-            # in this workflow already, so this is a "watch for" note, not a blocker.
-            #
-            # SEPARATE KNOWN ISSUE (also arm/32-bit specific): nodejs/node#58975,
-            # "Incorrect selection of x64 push_registers_asm.cc for host build when
-            # target is arm" — a gyp source-file-selection bug for the conservative-
-            # stack-scanning helper, distinct from the trap-handler fix below. Closed
-            # via nodejs/node#57748 but, per that PR's own description, not a complete
-            # fix. If the arm (32-bit) leg fails on an undefined push_registers_asm-
-            # related symbol specifically, that issue thread is the place to look.
-          fi
+          # ============================================================
+          # CORRECTION: the old comment here read "V8 requires 32-bit host
+          # tools for 32-bit targets" and set CFLAGS_host/CXXFLAGS_host/
+          # LDFLAGS_host=-m32 whenever dest_cpu=="arm". That assumption is
+          # NOT correct for this build. mksnapshot/torque run natively ON
+          # the x64 CI runner — they generate a snapshot/bytecode artifact
+          # that gets embedded into the target binary, but the *tool itself*
+          # executes as a normal x64 host binary, independent of dest_cpu.
+          # There is no requirement to compile host tools as 32-bit just
+          # because the final target is 32-bit ARM.
+          #
+          # Forcing -m32 here is what actually caused the "bad register
+          # name `%rbp'" / `%rsp'` etc. assembler errors on the armeabi-v7a
+          # leg: deps/v8/src/heap/base/asm/x64/push_registers_asm.cc (which
+          # v8.gyp correctly selects for the host toolset, since
+          # host_arch=="x64" on every GH Actions runner — see the note in
+          # the patch step above) contains raw 64-bit-register inline
+          # assembly with no arch #ifdef of its own. Feeding that file to a
+          # compiler running in forced -m32 mode breaks it outright,
+          # regardless of what gyp source-selection logic decided — this
+          # was never a source-selection problem.
+          #
+          # A HOST_M64="-m64" override existed further down (on the `make`
+          # command only) specifically to fight this same -m32, but
+          # ./configure below reads CFLAGS_host/CXXFLAGS_host/LDFLAGS_host
+          # from the environment and bakes them into config.gypi *before*
+          # that make-time override ever runs — so -m32 could still leak
+          # into host compiles that happen via config.gypi's flags rather
+          # than the make command line, depending on gyp's generator. The
+          # clean fix is to never set -m32 for the host in the first place.
+          #
+          # gcc-multilib/g++-multilib (installed in the "Install 32-bit
+          # multilib" step above) are harmless to leave installed even
+          # though they're no longer required by this step; they don't
+          # affect this build now that host tools stay native x64.
+          # ============================================================
 
           # android_ndk_path is REQUIRED (node.gyp fails without it)
           #
@@ -760,10 +766,10 @@ jobs:
           # Build ONLY the 'node' target: produces both out/Release/node (CLI)
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
-          # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc uses x64
-          # registers. Force -m64 on host compilers to override.
-          HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
-          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
+          # No -m32/-m64 override needed here anymore: host tools are never forced
+          # to a non-native bitness (see the corrected note above the ./configure
+          # call), so there is nothing to counteract on the host compiler flags.
+          make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
