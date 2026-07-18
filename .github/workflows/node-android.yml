@@ -516,11 +516,17 @@ jobs:
               # member function bodies. We use this-> qualification to make them
               # dependent (deferred to phase 2).
               #
-              # 1. matcher_ init list: matcher_ is a DIRECT member of
-              # AssemblerOpInterface (line ~5636), NOT inherited from Next,
-              # so it does NOT need CRTP qualification in the initializer.
-              # (The { return matcher_; } body getter below does need this->.)
-              # 2. matcher_ in body getter
+              # 1. matcher_ declaration at line ~5636 is AFTER the constructor
+              # at line ~1549. GCC requires data members referenced in member
+              # initializer lists to be declared BEFORE the constructor (phase 1
+              # lookup). Clang defers lookup. So we move matcher_ before the
+              # constructor and keep the initializer list as-is.
+              s = s.replace(
+                  '  TURBOSHAFT_REDUCER_BOILERPLATE(AssemblerOpInterface)\n\n  template <typename... Args>',
+                  '  TURBOSHAFT_REDUCER_BOILERPLATE(AssemblerOpInterface)\n\n  OperationMatcher matcher_;\n\n  template <typename... Args>')
+              s = s.replace('  OperationMatcher matcher_;\n};', '};')
+
+              # 2. matcher_ in body getter (this-> is still needed for CRTP)
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
 
               # 3. ReduceIfReachable calls — qualify call sites ONLY.
