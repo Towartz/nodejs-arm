@@ -34,7 +34,7 @@ on:
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 env:
-  # r26d pinned: NDK r27+ Clang 18 has CRTP regression in turboshaft on v26.x
+  # r27c fails on v26.x turboshaft CRTP; r26d (Clang 17) is the last working
   # deps/v8/src/compiler/turboshaft/assembler.h on this Node branch (CRTP
   # name-resolution regression in AssemblerOpInterface — surfaces as "expected
   # '}'" in pipeline.cc plus cascading undeclared-identifier errors for
@@ -83,17 +83,29 @@ jobs:
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
-      # ---------- 1. Android NDK ----------
-      - name: Set up Android NDK ${{ env.NDK_VERSION }}
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
+      # ---------- 1. Android NDK (r26d) ----------
+      # NDK r27+ ships Clang 18+, which has a CRTP regression in V8's turboshaft
+      # AssemblerOpInterface on Node.js v26.x. r26d (Clang 17) is the last working
+      # version. We download it manually because nttld/setup-ndk doesn't override
+      # the system-preinstalled NDK on GitHub Actions runners.
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: |
+          NDK_ZIP="android-ndk-${{ env.NDK_VERSION }}-linux.zip"
+          NDK_URL="https://dl.google.com/android/repository/$NDK_ZIP"
+          echo "Downloading NDK ${{ env.NDK_VERSION }} from $NDK_URL ..."
+          curl -fsSL -o "$NDK_ZIP" "$NDK_URL"
+          unzip -q "$NDK_ZIP"
+          rm "$NDK_ZIP"
+          NDK_DIR="${{ github.workspace }}/android-ndk-${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK installed at $NDK_DIR"
 
       - name: Verify NDK toolchain paths
         run: |
-          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$ANDROID_NDK}" >> "$GITHUB_ENV"
-          TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          echo "NDK OK: ${ANDROID_NDK_HOME}"
 
       # ---------- 2. Host build tools ----------
       - name: Install host build tools
