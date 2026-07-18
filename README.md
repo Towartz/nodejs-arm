@@ -90,7 +90,7 @@ Patches cover: V8 stack tracing, trap handler, zlib cpu_features, std::atomic_re
 | Branch | Node.js version | NDK | Status |
 |--------|----------------|-----|--------|
 | `main` | v26.x | r26d | Active development |
-| `build_ndkr27` | v24.x LTS | r27d | Maintained (v24.x turboshaft unaffected) |
+| `v24.x-lts` | v24.x LTS | r27d | Maintained (v24.x turboshaft unaffected) |
 
 <!-- yolo achievement test -->
 
