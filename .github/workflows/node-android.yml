@@ -33,6 +33,10 @@ on:
           - 'speed'       # + LTO: faster, much longer build
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # r27c fails on v26.x turboshaft CRTP; r26d (Clang 17) is the last working
   # deps/v8/src/compiler/turboshaft/assembler.h on this Node branch (CRTP
@@ -49,6 +53,7 @@ jobs:
   build:
     name: android-${{ matrix.abi }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
     # x64 hosts has open bugs (nodejs/node#58975). Never let it block arm64.
     continue-on-error: ${{ matrix.experimental || false }}
@@ -68,14 +73,20 @@ jobs:
 
     steps:
       # ---------- 0. Resolve inputs ----------
+      # SECURITY: custom_ref and lib_name are free-text workflow_dispatch inputs.
+      # Read them through env: variables (resolved before the shell runs) instead of
+      # ${{ }} inline interpolation to prevent shell-metacharacter injection.
       - name: Resolve inputs
+        env:
+          CUSTOM_REF_RAW: ${{ inputs.custom_ref || '' }}
+          LIB_NAME_RAW: ${{ inputs.lib_name || 'node' }}
         run: |
           REQ="${{ inputs.node_version || 'v26.x' }}"
-          if [ "$REQ" = "custom" ]; then REQ="${{ inputs.custom_ref }}"; fi
-          test -n "$REQ" || { echo "::error::custom_ref is empty"; exit 1; }
+          if [ "$REQ" = "custom" ]; then REQ="$CUSTOM_REF_RAW"; fi
+          if [ -z "$REQ" ]; then echo "::error::custom_ref is empty"; exit 1; fi
           echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
 
-          NAME="${{ inputs.lib_name || 'node' }}"
+          NAME="$LIB_NAME_RAW"
           NAME="${NAME#lib}"; NAME="${NAME%.so}"
           if ! [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
             echo "::error::Invalid lib_name '$NAME'"; exit 1
@@ -107,12 +118,34 @@ jobs:
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           echo "NDK OK: ${ANDROID_NDK_HOME}"
 
+      # ---------- 1b. ccache ----------
+      # Everything above this point is seconds; the ~2h this job takes is almost
+      # entirely the make step in section 4 — a from-scratch V8+Node compile with
+      # no object reuse between runs. ccache fixes that: it caches compiled objects
+      # by actual preprocessed source+flags content, so reruns/retries and
+      # iterating on this workflow (not on Node's own source) get much faster once
+      # the first run has populated the cache. The cache itself is populated only
+      # on its first run — the win is every run after that.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+
+      - name: Cache ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-
+
       # ---------- 2. Host build tools ----------
       - name: Install host build tools
         run: |
+          python3 -c "import sys; v=sys.version_info; assert v>=(3,10), f'need Python>=3.10, got {v}'"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3 g++ make git ca-certificates patchelf
+            python3 g++ make git ca-certificates patchelf ccache
 
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
@@ -519,8 +552,8 @@ jobs:
           export PATH="$TC/bin:$PATH"
 
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
-          export CC="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
-          export CXX="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
           export AR="$TC/bin/llvm-ar"
           export NM="$TC/bin/llvm-nm"
           export RANLIB="$TC/bin/llvm-ranlib"
@@ -531,8 +564,8 @@ jobs:
           # CRITICAL: host build tools must use the host compiler.
           # Without this, configure probes the ARM clang and thinks host_arch=arm,
           # and host tools (torque/mksnapshot) get built with the Android toolchain.
-          export CC_host=gcc
-          export CXX_host=g++
+          export CC_host="ccache gcc"
+          export CXX_host="ccache g++"
 
           # V8 requires 32-bit host tools for 32-bit targets
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
@@ -615,7 +648,10 @@ jobs:
           # patterns (names from dependent bases used in macro expansions). GCC/clang's
           # -fpermissive downgrades these to warnings — the resulting code is valid.
           HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
-          make -j"$(nproc)" node CC.host="gcc $HOST_M64" CXX.host="g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar CXXFLAGS="-fpermissive"
+          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar CXXFLAGS="-fpermissive"
+
+          echo "---- ccache stats (${{ matrix.abi }}) ----"
+          ccache -s
 
       # ---------- 5. Rename, strip, package ----------
       - name: Package lib${{ env.LIB_NAME }}.so + node
@@ -647,8 +683,9 @@ jobs:
           fi
 
           "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
-          cp "$LIB_PATH" "$LIB"
-          cp out/Release/node node
+          # Self-copy guard: don't cp if src and dest are the same inode
+          [ "$(readlink -f "$LIB_PATH")" = "$(readlink -f "$LIB")" ] || cp "$LIB_PATH" "$LIB"
+          [ "$(readlink -f out/Release/node)" = "$(readlink -f node)" ] || cp out/Release/node node
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
           "$TC/bin/llvm-strip" --strip-all node
           if [ "$LIB_NAME" != "node" ]; then
