@@ -1,6 +1,6 @@
 <div align="center">
 
-# Node.js for Android ARM
+# Node.js for Android ARM — **v26.x**
 
 [![Build](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=build&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![NDK](https://img.shields.io/badge/NDK-r26d(Clang%2017)-blue?logo=android)](https://developer.android.com/ndk)
@@ -9,6 +9,7 @@
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 [![Views](https://hits.sh/github.com/Towartz/nodejs-arm.svg?label=views&color=555)](https://hits.sh/github.com/Towartz/nodejs-arm/)
 
+**v26.x** — Build still **in progress** (Clang C++20 CRTP workaround).  
 Cross-compiled `libnode.so` + `node` CLI for Android ARM64 / ARM32 via GitHub Actions.
 
 </div>
@@ -17,18 +18,17 @@ Cross-compiled `libnode.so` + `node` CLI for Android ARM64 / ARM32 via GitHub Ac
 
 | Task | Status | Details |
 |------|--------|---------|
-| `arm64-v8a` balanced build | ✅ | JIT + `-O3`, verified |
-| `arm64-v8a` speed build | ✅ | LTO enabled |
-| `arm64-v8a` size build | ✅ | V8 lite-mode |
-| `armeabi-v7a` balanced build | ⚠️ | Experimental — V8 cross-build bugs ([#58975](https://github.com/nodejs/node/issues/58975)) |
-| `armeabi-v7a` speed build | ⚠️ | Experimental |
-| `armeabi-v7a` size build | ⚠️ | Experimental |
-| CRTP two-phase lookup fix (main) | 🛠️ | `resolve`/`Comparison`/`IntPtrLessThan` → `this->` via `re.sub` |
-| CRTP forward-declare fix (ndkr27) | ✅ | v24.x class structure compatible |
-| NDK r26d manual install | ✅ | Bypasses system NDK r27c overriding |
-| Host `-m64` override for arm32 | 🛠️ | `push_registers_asm.cc` x64 registers in `-m32` mode |
+| `arm64-v8a` balanced build | 🛠️ | JIT + `-O3` — CRTP two-phase lookup in progress |
+| `arm64-v8a` speed build | 🛠️ | LTO — blocked by CRTP fix |
+| `arm64-v8a` size build | 🛠️ | V8 lite-mode — blocked by CRTP fix |
+| `armeabi-v7a` balanced build | ⛔ | Experimental — CRTP + V8 cross-build bugs ([#58975](https://github.com/nodejs/node/issues/58975)) |
+| `armeabi-v7a` speed build | ⛔ | Experimental |
+| `armeabi-v7a` size build | ⛔ | Experimental |
+| CRTP two-phase lookup fix | 🛠️ | `-fpermissive` + `this->resolve`/`Comparison`/`IntPtrLessThan` regex |
+| ccache caching | ✅ | Ported from v24.x-lts |
+| NDK r26d manual install | ✅ | Bypasses system NDK r27c |
+| Host `-m64` override for arm32 | ✅ | `push_registers_asm.cc` fix |
 | CI artifacts + release attach | ✅ | Upload + GitHub Release on tags |
-| `CODE_OF_CONDUCT` | ✅ | Added to both branches |
 
 ## Builds
 
@@ -89,8 +89,8 @@ Patches cover: V8 stack tracing, trap handler, zlib cpu_features, std::atomic_re
 
 | Branch | Node.js version | NDK | Status |
 |--------|----------------|-----|--------|
-| `main` | v26.x | r26d | Active development |
-| `v24.x-lts` | v24.x LTS | r27d | Maintained (v24.x turboshaft unaffected) |
+| **`main`** | **v26.x** | **r26d** | **🛠️ In progress — CRTP workaround** |
+| **`v24.x-lts`** | **v24.x LTS** | **r27d** | **✅ Verified — turboshaft unaffected** |
 
 <!-- yolo achievement test -->
 
