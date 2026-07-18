@@ -588,6 +588,22 @@ jobs:
           else:
               fs_c.write_text(s.replace(old_close, new_close, 1))
               print("closed #ifndef __ANDROID__ block in deps/uv/src/unix/fs.c")
+          # FIX for: nodejs/node#58975 — "Incorrect selection of x64
+          # push_registers_asm.cc for host build when target is arm".
+          # The gyp condition for the x64 variant checks
+          # '_toolset=="host" and host_arch=="x64"' without also requiring
+          # target_arch=="x64", so when cross-compiling to ARM on an x64 host,
+          # the x64 source is compiled for the HOST toolset. Combined with the
+          # -m32 CFLAGS_host that V8's gyp build adds for 32-bit targets (and
+          # the -m64 override the workflow applies on top), the resulting x64
+          # inline assembly gets fed to the ARM NDK assembler, which produces
+          # "bad register name `%rbp'" errors. Fix: add 'and target_arch=="x64"'
+          # to the host-side condition so the x64 source is only compiled for
+          # the host during native x64 builds (not cross-compiles). The target-
+          # side condition is unchanged and still matches native x64 builds.
+          patch('tools/v8_gypfiles/v8.gyp',
+                '_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"',
+                '_toolset == "host" and host_arch == "x64" and target_arch == "x64" or _toolset == "target" and target_arch=="x64"')
           PYEOF
 
           echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
