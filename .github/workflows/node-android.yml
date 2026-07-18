@@ -436,19 +436,24 @@ jobs:
 
               # CRTP two-phase lookup fix for Clang C++20:
               # AssemblerOpInterface<Next> : public Next uses names from dependent
-              # base Next. In C++20, Clang requires this-> for dependent names
-              # that aren't found in phase 1 lookup.
+              # base Next and its own members. In C++20, Clang doesn't find
+              # names declared later in the class from member function bodies
+              # (even with late parsing). We add forward decls and this->.
               #
-              # 1. matcher_ init list: qualify with Next:: (this-> isn't valid there)
+              # 1. matcher_ init list: qualify with Next::
               s = s.replace(', matcher_(Asm().output_graph())',
                             ', Next::matcher_(Asm().output_graph())')
               # 2. matcher_ in body getter
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
-              # 3. All ReduceIfReachable in macro defs and class body
+              # 3. All ReduceIfReachable (inherited from Next via CRTP)
               s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
-              # 4. resolve() calls in macro expansions (defined at line 5326,
-              #    member template - late-parsed but needs this-> in C++20)
-              s = s.replace('(resolve(', '(this->resolve(')
+              # 4. Forward-declare resolve so Clang finds it before line 5326
+              s = s.replace('class AssemblerOpInterface : public Next {',
+                            'class AssemblerOpInterface : public Next {
+'
+                            '  template <typename Rep>
+'
+                            '  V<Rep> resolve(const V<Rep>& v);')
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
