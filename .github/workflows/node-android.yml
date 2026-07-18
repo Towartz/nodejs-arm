@@ -575,7 +575,7 @@ jobs:
               )
               new_macro = (
                   '      // static_assert(kTaggedSize == kInt32Size);  // relaxed for Android cross-compile \\\n'
-                  '      // static_assert(v8::internal::SmiValuesAre31Bits());  // relaxed for Android cross-compile'
+                  '      // static_assert(v8::internal::SmiValuesAre31Bits());  // relaxed for Android cross-compile   \\'
               )
 
               if old_macro in s:
