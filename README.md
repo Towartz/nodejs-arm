@@ -92,4 +92,6 @@ Patches cover: V8 stack tracing, trap handler, zlib cpu_features, std::atomic_re
 
 ## License
 
-[MIT](LICENSE)
+[GPLv3 with Additional Restrictions](LICENSE)
+
+This project uses the **GNU GPLv3** with additional restrictions that require preserving original attribution, build workflow credit, and project name integrity. You may not rename, rebrand, or redistribute this work in a way that obscures its origin.
