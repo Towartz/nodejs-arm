@@ -391,19 +391,6 @@ jobs:
           patch('node.gyp',
                 "      ['OS==\"linux\" and clang==1', {",
                 "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
-          # Build node as a shared library so the output is a single .so that
-          # works both as System.loadLibrary() target and as a subprocess binary.
-          node_gyp = pathlib.Path('node.gyp')
-          s = node_gyp.read_text()
-          s = s.replace(
-              "'target_name': '<(node_core_target_name)',\n"
-              "      'type': 'executable',",
-              "'target_name': '<(node_core_target_name)',\n"
-              "      'type': 'shared_library',\n"
-              "      'product_name': 'aurora_node',\n"
-              "      'soname': 'libaurora_node.so',")
-          node_gyp.write_text(s)
-          print("patched node.gyp (node target -> shared_library libaurora_node.so)")
           patch('tools/v8_gypfiles/toolchain.gypi',
                 "    'v8_android_log_stdout%': 0,", "    'v8_android_log_stdout%': 1,")
           v8_tc = pathlib.Path('tools/v8_gypfiles/toolchain.gypi')
@@ -725,6 +712,7 @@ jobs:
             --cross-compiling \
             --dest-os=android \
             --dest-cpu=${{ matrix.dest_cpu }} \
+            --shared \
             --with-intl=none \
             --without-npm \
             $NODEEXTRA \
@@ -733,10 +721,9 @@ jobs:
 
           # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
           # in some configurations, silently breaking host-tool linking).
-          # Build ONLY the 'node' target: produces a single libaurora_node.so
-          # (shared library with main()) that serves as both System.loadLibrary()
-          # target and subprocess binary. Skip cctest and other test/auxiliary
-          # targets to save 5-10 minutes of build time.
+          # Build ONLY the 'node' target: produces both out/Release/node (CLI)
+          # and out/Release/lib.target/libnode.so (shared library). Skip cctest
+          # and other test/auxiliary targets to save 5-10 minutes of build time.
           # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc needs x64.
           HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
           make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
@@ -752,34 +739,39 @@ jobs:
           TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
           LIB="lib${LIB_NAME}.so"
 
-          # The build now produces a single libaurora_node.so (both library + entry point)
-          echo "Searching for libaurora_node.so in out/Release..."
-          find out/Release -name "libaurora_node.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
+          # Diagnostic: confirm where libnode.so actually landed.
+          # The ninja.py patch above changes SHARED_INTERMEDIATE_DIR and adds an
+          # $|OBJ toolset suffix, which can move the .so out of lib.target.
+          echo "Searching for libnode.so in out/Release..."
+          find out/Release -name "libnode.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
           echo "Directory structure under out/Release:"
           find out/Release -maxdepth 3 -type d
 
-          if [ -f "out/Release/lib.target/libaurora_node.so" ]; then
-            LIB_PATH="out/Release/lib.target/libaurora_node.so"
-          elif [ -f "out/Release/libaurora_node.so" ]; then
-            echo "Found at out/Release/libaurora_node.so instead of lib.target/"
-            LIB_PATH="out/Release/libaurora_node.so"
-          elif [ -f "out/Release/obj.target/libaurora_node.so" ]; then
-            echo "Found at out/Release/obj.target/libaurora_node.so instead of lib.target/"
-            LIB_PATH="out/Release/obj.target/libaurora_node.so"
+          if [ -f "out/Release/lib.target/libnode.so" ]; then
+            LIB_PATH="out/Release/lib.target/libnode.so"
+          elif [ -f "out/Release/libnode.so" ]; then
+            echo "Found at out/Release/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/libnode.so"
+          elif [ -f "out/Release/obj.target/libnode.so" ]; then
+            echo "Found at out/Release/obj.target/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/obj.target/libnode.so"
           else
-            echo "::error::libaurora_node.so not found in any expected location"
+            echo "::error::libnode.so not found in any expected location"
             exit 1
           fi
 
           "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
-          # Copy to output (guard against same-inode)
+          # Self-copy guard: don't cp if src and dest are the same inode
           [ "$(readlink -f "$LIB_PATH")" = "$(readlink -f "$LIB")" ] || cp "$LIB_PATH" "$LIB"
+          [ "$(readlink -f out/Release/node)" = "$(readlink -f node)" ] || cp out/Release/node node
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
+          "$TC/bin/llvm-strip" --strip-all node
           if [ "$LIB_NAME" != "node" ]; then
             patchelf --set-soname "$LIB" "$LIB"
+            patchelf --replace-needed libnode.so "$LIB" node
           fi
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB"
-          ls -lh "$LIB" "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
+          ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
 
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
