@@ -34,14 +34,14 @@ on:
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 env:
-  # r27c pinned deliberately: NDK r29 ships Clang 21, which fails to compile
+  # r26d pinned: NDK r27+ Clang 18 has CRTP regression in turboshaft on v26.x
   # deps/v8/src/compiler/turboshaft/assembler.h on this Node branch (CRTP
   # name-resolution regression in AssemblerOpInterface — surfaces as "expected
   # '}'" in pipeline.cc plus cascading undeclared-identifier errors for
   # resolve/ReduceIfReachable*/matcher_). r27c's older Clang doesn't hit it.
   # Confirmed working via nttld/setup-ndk below. If a future Node/V8 release
   # patches turboshaft for Clang 21+, r29 becomes an option again.
-  NDK_VERSION: 'r27c'
+  NDK_VERSION: 'r26d'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
