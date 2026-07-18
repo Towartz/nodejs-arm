@@ -516,9 +516,10 @@ jobs:
               # member function bodies. We use this-> qualification to make them
               # dependent (deferred to phase 2).
               #
-              # 1. matcher_ init list: qualify with Next::
-              s = s.replace(', matcher_(Asm().output_graph())',
-                            ', Next::matcher_(Asm().output_graph())')
+              # 1. matcher_ init list: matcher_ is a DIRECT member of
+              # AssemblerOpInterface (line ~5636), NOT inherited from Next,
+              # so it does NOT need CRTP qualification in the initializer.
+              # (The { return matcher_; } body getter below does need this->.)
               # 2. matcher_ in body getter
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
 
