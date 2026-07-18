@@ -463,7 +463,7 @@ jobs:
           python3 - <<'PYEOF'
           import pathlib
           import re
-          
+
           assembler_h = pathlib.Path('deps/v8/src/compiler/turboshaft/assembler.h')
           if assembler_h.exists():
               s = assembler_h.read_text()
@@ -480,17 +480,19 @@ jobs:
                             ', Next::matcher_(Asm().output_graph())')
               # 2. matcher_ in body getter
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
-              # 3. All ReduceIfReachable (inherited from Next via CRTP)
+              # 3. ReduceIfReachable calls (global replace + undo definition context)
               s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
-              # 4. resolve left/right calls (non-dependent member, needed inside
-              #    macro expansions and other member fn bodies before its definition)
-              s = re.sub(r'(?<![.>:\w])resolve\(', 'this->resolve(', s)
-              # 5. Comparison/IntPtrLessThan — same two-phase lookup issue
-              s = re.sub(r'(?<![.>:\w])Comparison\(', 'this->Comparison(', s)
-              # 6. SMI_COMPARISON_OP macro: IntPtrOpName/Int32OpName are macro params
-              #    expanded to actual function names (IntPtrLessThan etc.). The source
-              #    uses the param names, so regex on concrete func names won't match.
-              #    Patch the macro definition text instead.
+              s = s.replace('V8_INLINE OpIndex this->ReduceIfReachable',
+                            'V8_INLINE OpIndex ReduceIfReachable')
+              # 4. resolve() calls — only in call contexts, never in function defs
+              s = s.replace('(resolve(', '(this->resolve(')
+              s = s.replace(', resolve(', ', this->resolve(')
+              s = s.replace('return resolve(', 'return this->resolve(')
+              s = s.replace('= resolve(', '= this->resolve(')
+              # 5. Comparison() — single unqualified call in Equal()
+              s = s.replace('return Comparison(', 'return this->Comparison(')
+              # 6. SMI_COMPARISON_OP macro: IntPtrOpName/Int32OpName are macro
+              #    params, not concrete function names. Patch the macro def text.
               s = s.replace(
                   '      return IntPtrOpName(l, r);                                           \\',
                   '      return this->IntPtrOpName(l, r);                                     \\')
@@ -516,36 +518,22 @@ jobs:
                   print("patched assembler.h (SMI_COMPARISON_OP assertions)")
               else:
                   print("::warning::SMI_COMPARISON_OP assertions not found in assembler.h")
+
+              # ----- Post-patch syntax sanity checks -----
+              errors = []
+              if 'V<Rep> this->resolve(' in s:
+                  errors.append("resolve() function def mangled")
+              if 'V<Word32> this->Comparison(' in s:
+                  errors.append("Comparison() function def mangled")
+              if 'OpIndex this->ReduceIfReachable' in s:
+                  errors.append("REDUCE_OP macro def mangled")
+              if errors:
+                  for e in errors:
+                      print(f"::error::PATCH FAILED: {e}")
+                  exit(1)
+              print("patch syntax sanity check: OK")
           else:
               print("::warning::assembler.h not found")
-
-          if '${{ matrix.dest_cpu }}' == 'arm':
-              print("applying 32-bit assertion relaxations...")
-              for p, asserts in [
-                  ('deps/v8/src/wasm/wasm-objects.h',
-                   ['  static_assert(IsAligned(kProtectedOffheapDataOffset, kTaggedSize));',
-                    '  static_assert(IsAligned(kEntriesOffset, kTaggedSize));',
-                    '  static_assert(IsAligned(kEntrySize, kTaggedSize));',
-                    '  static_assert(IsAligned(kImplicitArgBias, kTaggedSize));']),
-                  ('deps/v8/src/objects/number-string-cache.h',
-                    ['static_assert(DoubleStringCache::SizeFor(DoubleStringCache::kMaxCapacity) <\n'
-                     '              kMaxRegularHeapObjectSize);']),
-                  ('deps/v8/src/sandbox/js-dispatch-table.h',
-                   ['static_assert(sizeof(JSDispatchEntry) == kJSDispatchTableEntrySize);']),
-              ]:
-                  fp = pathlib.Path(p)
-                  if fp.exists():
-                      t = fp.read_text()
-                      for a in asserts:
-                          if a in t:
-                              # Block comment (/* */) so multi-line static_asserts
-                              # are fully disabled, not just their first line.
-                              t = t.replace(a, f'/* {a.lstrip()} */  // relaxed for cross-compile')
-                      fp.write_text(t); print(f"  relaxed {p}")
-                  else:
-                      print(f"  ::warning::{p} not found")
-          else:
-              print("skipping 32-bit assertion relaxations")
           PYEOF
 
           echo "Skipped from Termux's patch set (not applicable to generic NDK cross-build):"
