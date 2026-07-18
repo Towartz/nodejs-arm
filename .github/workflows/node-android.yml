@@ -487,7 +487,16 @@ jobs:
               s = re.sub(r'(?<![.>:\w])resolve\(', 'this->resolve(', s)
               # 5. Comparison/IntPtrLessThan — same two-phase lookup issue
               s = re.sub(r'(?<![.>:\w])Comparison\(', 'this->Comparison(', s)
-              s = re.sub(r'(?<![.>:\w])IntPtrLessThan\(', 'this->IntPtrLessThan(', s)
+              # 6. SMI_COMPARISON_OP macro: IntPtrOpName/Int32OpName are macro params
+              #    expanded to actual function names (IntPtrLessThan etc.). The source
+              #    uses the param names, so regex on concrete func names won't match.
+              #    Patch the macro definition text instead.
+              s = s.replace(
+                  '      return IntPtrOpName(l, r);                                           \\',
+                  '      return this->IntPtrOpName(l, r);                                     \\')
+              s = s.replace(
+                  '      return Int32OpName(TruncateWordPtrToWord32(l),                       \\',
+                  '      return this->Int32OpName(TruncateWordPtrToWord32(l),                 \\')
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
@@ -644,11 +653,8 @@ jobs:
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
           # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc needs x64.
-          # -fpermissive: Clang 17 C++20 two-phase lookup is too strict for V8's CRTP
-          # patterns (names from dependent bases used in macro expansions). GCC/clang's
-          # -fpermissive downgrades these to warnings — the resulting code is valid.
           HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
-          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar CXXFLAGS="-fpermissive"
+          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
