@@ -14,8 +14,15 @@ on:
         type: choice
         default: 'v24.x'
         options:
+          # Verified 2026-07-18 against nodejs.org release posts: v24.x is Active LTS
+          # ("Krypton"), v26.x is Current (entered the Current slot 2026-05-05, becomes
+          # LTS 2026-10). Note for later: starting with v27 in Oct 2026, Node moves to one
+          # major/year and every release becomes LTS, so this odd/even split goes away —
+          # this dropdown will want a straight version-number entry instead of a
+          # LTS-vs-latest pairing once that lands. 'custom' already covers it in the
+          # meantime via any branch/tag ref.
           - 'v24.x'       # LTS (Krypton)
-          - 'v26.x'       # Latest release line
+          - 'v26.x'       # Current (not yet LTS)
           - 'custom'
       custom_ref:
         description: 'Custom git ref — only used when "custom" is selected'
@@ -34,18 +41,47 @@ on:
           - 'speed'       # + LTO: faster, much longer build
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
+# A from-scratch V8 cross-compile is expensive (this is not a fast job, especially
+# under the `speed` profile's --enable-lto). Group by ref so a second push to the
+# same branch/tag cancels the stale run instead of both burning CI minutes in parallel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
-  NDK_VERSION: 'r27c'
+  # r27d supersedes r27c within the same LTS line (bugfix-only bump, not a track
+  # change) — verified against developer.android.com/ndk/downloads on 2026-07-18,
+  # where r27d is listed as "Latest LTS Version". r29 is the current non-LTS
+  # "Latest Stable"; r30 (beta1 as of this check) will be the *next* LTS. Staying on
+  # the LTS point release here rather than jumping to r29/r30 to match this
+  # workflow's existing LTS-track choice — bump deliberately, not by drive-by.
+  NDK_VERSION: 'r27d'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
 jobs:
   build:
     name: android-${{ matrix.abi }}
-    runs-on: ubuntu-latest
+    # Pinned instead of floating `ubuntu-latest`. GitHub rolled ubuntu-latest onto a
+    # new default image 2026-06-08→06-15 (24.04 → 26.04, per actions/runner-images —
+    # verified 2026-07-18, i.e. that migration is already behind us or finishing right
+    # about now), following the same 22.04→24.04 pattern from late 2024/early 2025.
+    # GitHub's own runner-images docs recommend pinning for exactly this reason. This
+    # build is sensitive to the runner's default gcc/g++ and python3 versions (see the
+    # GCC-specific turboshaft-Tuple patch below, and the Python >=3.10 check in the
+    # host-tools step) and to gcc-multilib/g++-multilib packaging for the armeabi-v7a
+    # leg — not things that should shift under this workflow on a random day because
+    # GitHub silently repointed a floating label. Bump this deliberately when ready to
+    # validate the new image, rather than inheriting it automatically.
+    runs-on: ubuntu-24.04
     # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
     # x64 hosts has open bugs (nodejs/node#58975). Never let it block arm64.
     continue-on-error: ${{ matrix.experimental || false }}
+    # From-scratch V8+Node cross-compile; --enable-lto (speed profile) especially can
+    # run long. Without this, a genuine hang rides the GH Actions default of 360
+    # minutes before anything stops it. 180 is generous headroom over normal runs
+    # (including LTO) without leaving the job free to run indefinitely.
+    timeout-minutes: 180
     permissions:
       contents: write
     strategy:
@@ -62,14 +98,30 @@ jobs:
 
     steps:
       # ---------- 0. Resolve inputs ----------
+      # SECURITY: custom_ref and lib_name are free-text workflow_dispatch inputs. They
+      # are passed in via `env:` and read as shell variables ($CUSTOM_REF_RAW etc.)
+      # below, NOT interpolated as ${{ }} inside the script body. Splicing free text
+      # straight into a run: block lets shell metacharacters in the input execute as
+      # part of the script itself, before the regex validation a few lines down ever
+      # runs — this is GitHub's own documented script-injection class (see "Script
+      # injections" / "Security hardening for GitHub Actions" in the Actions docs;
+      # the `env:` intermediate-variable pattern is their recommended fix). Given this
+      # job also holds `permissions: contents: write`, a successful injection here
+      # could push content or forge a release, not just leak a token. node_version and
+      # profile don't need this treatment — they're `type: choice`, so GitHub itself
+      # restricts them to the listed options before this step ever runs.
       - name: Resolve inputs
+        env:
+          NODE_VERSION_CHOICE: ${{ inputs.node_version || 'v24.x' }}
+          CUSTOM_REF_RAW: ${{ inputs.custom_ref }}
+          LIB_NAME_RAW: ${{ inputs.lib_name || 'node' }}
         run: |
-          REQ="${{ inputs.node_version || 'v24.x' }}"
-          if [ "$REQ" = "custom" ]; then REQ="${{ inputs.custom_ref }}"; fi
+          REQ="$NODE_VERSION_CHOICE"
+          if [ "$REQ" = "custom" ]; then REQ="$CUSTOM_REF_RAW"; fi
           test -n "$REQ" || { echo "::error::custom_ref is empty"; exit 1; }
           echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
 
-          NAME="${{ inputs.lib_name || 'node' }}"
+          NAME="$LIB_NAME_RAW"
           NAME="${NAME#lib}"; NAME="${NAME%.so}"
           if ! [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
             echo "::error::Invalid lib_name '$NAME'"; exit 1
@@ -78,6 +130,11 @@ jobs:
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
       # ---------- 1. Android NDK ----------
+      # @v1 is a floating major tag; it already resolves to 1.5.0 (current as of
+      # 2026-07-18) so no change needed here. If you want to harden against the tag
+      # being repointed later (this job holds contents: write), pin to the release
+      # commit SHA instead of @v1 — GitHub's own actions-hardening guidance recommends
+      # this for third-party actions generally.
       - name: Set up Android NDK ${{ env.NDK_VERSION }}
         uses: nttld/setup-ndk@v1
         with:
@@ -89,12 +146,49 @@ jobs:
           TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
 
+      # ---------- 1b. ccache ----------
+      # Everything above this point is seconds; the ~2h this job takes is almost
+      # entirely the make step in section 4 — a from-scratch V8+Node compile with
+      # no object reuse between runs. ccache fixes that: it caches compiled objects
+      # by actual preprocessed source+flags content, so reruns/retries and
+      # iterating on this workflow (not on Node's own source) get much faster once
+      # warm. A brand-new Node ref/ABI/profile combo still pays the full build time
+      # on its first run — the win is every run after that.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+
+      - name: Cache ccache directory
+        # @v5 verified current 2026-07-18 (runs on Node 24, needs Actions Runner
+        # >=2.327.1 — both already satisfied by the ubuntu-24.04 hosted runner).
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # run_id in the primary key means this always saves (so the cache keeps
+          # accumulating objects run over run); restore-keys prefix-matches the
+          # most recent cache for this abi+ref+profile combo regardless of run_id.
+          key: ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-
+
       # ---------- 2. Host build tools ----------
       - name: Install host build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3 g++ make git ca-certificates patchelf
+            python3 g++ make git ca-certificates patchelf ccache
+
+          # Node.js 26.x dropped support for building from source with Python < 3.10
+          # (verified against the "What's new in Node.js 26" release notes, 2026-07-18).
+          # ubuntu-24.04's default python3 (3.12) already clears this, but fail with a
+          # clear message here rather than an opaque gyp/python error after the build
+          # has already been running for a while — this matters more once someone points
+          # node_version at v26.x or a custom v26+ ref.
+          PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          python3 -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 10) else 1)' \
+            || { echo "::error::python3 is $PYVER, but Node >=26 needs >=3.10 to build from source"; exit 1; }
+          echo "python3 $PYVER OK"
 
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
@@ -113,7 +207,7 @@ jobs:
       - name: Patch V8 for Android cross-build
         working-directory: node
         run: |
-          python3 - <<'PYEOF'
+          python3 - <<'PYEOF' 2>&1 | tee /tmp/android-patch.log
           import pathlib
           import textwrap
 
@@ -175,6 +269,17 @@ jobs:
           # is strictly narrower since only the trap-handler fast path is dropped, not all
           # of WASM). Applied as an in-tree patch to keep this step's failure mode identical
           # to the block above (::warning on missing context) rather than a hard build stop:
+          #
+          # Re-checked 2026-07-18 whether upstream has since closed this gap generally
+          # (not just this one file): nodejs/node's own android_configure.py / ./android-
+          # configure still only auto-applies this single trap-handler.h patch. A JSON-
+          # driven multi-patch system to cover more of the Android build gaps was proposed
+          # (referencing the long-standing "TODO: In next version, it will be a JSON file
+          # listing all the patches" comment in that script), but as of the current `main`
+          # branch that TODO is still just a TODO — it hasn't landed. So none of the
+          # zlib/uv.gyp/atomic_ref/turboshaft/aligned_alloc patches below are things
+          # ./android-configure would apply for you yet; this hand-maintained set is
+          # filling real gaps, not redoing something upstream already ships.
           patch('deps/v8/src/trap-handler/trap-handler.h',
                 textwrap.dedent('''\
                     // X64 on Linux, Windows, MacOS, FreeBSD.
@@ -501,6 +606,20 @@ jobs:
           echo "    privilege-drop calls for Termux's unprivileged userland. Not a cross-compile"
           echo "    concern and not applicable here."
 
+          # Every "not found" / "already fixed upstream" case above prints its own
+          # ::warning:: line, but scattered warnings are easy to miss in a long log. Tally
+          # them into one clear signal instead. This step never hard-fails on a mismatch —
+          # Node's own configure/make will still catch anything that was actually load-
+          # bearing for the *build* — but a couple of these (FICLONE, aligned_alloc) only
+          # fix *runtime* correctness, so a silent miss there wouldn't fail CI at all and
+          # would only show up later, on-device.
+          FAILED_PATCHES="$(grep -c '::warning::' /tmp/android-patch.log || true)"
+          if [ "${FAILED_PATCHES:-0}" -gt 0 ]; then
+            echo "::warning::$FAILED_PATCHES Android patch attempt(s) above did not apply cleanly — see the ::warning:: lines above (or /tmp/android-patch.log) for which ones. Worth a look especially if this is a new Node ref/version."
+          else
+            echo "All expected Android patches applied cleanly."
+          fi
+
       # ---------- 4. Cross-compile ----------
       - name: Cross-compile Node.js for ${{ matrix.abi }}
         working-directory: node
@@ -509,8 +628,8 @@ jobs:
           export PATH="$TC/bin:$PATH"
 
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
-          export CC="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
-          export CXX="$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
           export AR="$TC/bin/llvm-ar"
           export NM="$TC/bin/llvm-nm"
           export RANLIB="$TC/bin/llvm-ranlib"
@@ -521,8 +640,8 @@ jobs:
           # CRITICAL: host build tools must use the host compiler.
           # Without this, configure probes the ARM clang and thinks host_arch=arm,
           # and host tools (torque/mksnapshot) get built with the Android toolchain.
-          export CC_host=gcc
-          export CXX_host=g++
+          export CC_host="ccache gcc"
+          export CXX_host="ccache g++"
 
           # V8 requires 32-bit host tools for 32-bit targets
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
@@ -600,7 +719,10 @@ jobs:
           # Build ONLY the 'node' target: produces both out/Release/node (CLI)
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
-          make -j"$(nproc)" node CC.host=gcc CXX.host=g++ LINK.host=g++ AR.host=ar
+          make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host=g++ AR.host=ar
+
+          echo "---- ccache stats (${{ matrix.abi }}) ----"
+          ccache -s
 
       # ---------- 5. Rename, strip, package ----------
       - name: Package lib${{ env.LIB_NAME }}.so + node
@@ -634,7 +756,18 @@ jobs:
 
           "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
           cp "$LIB_PATH" "$LIB"
-          cp out/Release/node node
+
+          # Same flattened-layout quirk affects the CLI binary: on some
+          # gyp/make configs out/Release/node IS the working-directory root's
+          # "node" (this dir was created by `git clone ... node`), so
+          # `cp out/Release/node node` copies a file onto itself and `cp`
+          # aborts with exit 1. Only copy when source and dest actually differ.
+          if [ ! -e node ] || [ "$(readlink -f out/Release/node)" != "$(readlink -f node)" ]; then
+            cp out/Release/node node
+          else
+            echo "out/Release/node and node are already the same file, skipping copy"
+          fi
+
           "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
           "$TC/bin/llvm-strip" --strip-all node
           if [ "$LIB_NAME" != "node" ]; then
@@ -647,7 +780,7 @@ jobs:
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7  # v4 was 3 majors behind (verified 2026-07-18); name/path/retention-days unchanged across v4->v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
@@ -656,6 +789,6 @@ jobs:
       # ---------- 6b. Attach to GitHub Release (tag pushes only) ----------
       - name: Attach to GitHub Release
         if: success() && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3  # v2 -> v3 verified current 2026-07-18; `files:` input unchanged
         with:
           files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
