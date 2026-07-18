@@ -534,6 +534,16 @@ jobs:
               # excludes exactly the token-paste shape and nothing else.
               s = re.sub(r'\bReduceIfReachable(?!##)', r'this->ReduceIfReachable', s)
 
+              # 3b. Macro bodies use token-paste: ReduceIfReachable##operation.
+              # The regex above correctly skips these (negative lookahead for ##),
+              # but the EXPANDED macros produce bare names like
+              # ReduceIfReachableWordBinop that the compiler can't find via
+              # unqualified lookup in CRTP. Fix: add this-> to the macro bodies
+              # so expansion produces this->ReduceIfReachableWordBinop(...).
+              # Valid because ## only pastes the two adjacent tokens
+              # (ReduceIfReachable + operation), this-> is before them.
+              s = s.replace('return ReduceIfReachable##', 'return this->ReduceIfReachable##')
+
               # 4. resolve() calls — only in call contexts, never in function defs
               s = s.replace('(resolve(', '(this->resolve(')
               s = s.replace(', resolve(', ', this->resolve(')
@@ -552,10 +562,16 @@ jobs:
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
-              # Comment out the problematic static assertions in SMI_COMPARISON_OP macro
+              # Comment out the problematic static assertions in SMI_COMPARISON_OP macro.
+              # IMPORTANT: the old string MUST include the trailing '\' on the second line
+              # (the macro-continuation backslash). If we only match up to '();' and leave
+              # the trailing '\' in place, the new line's '//' comment will swallow the
+              # next physical line (the return statement) via phase-2 line splicing — the
+              # backslash joins the return line into the comment, silently destroying the
+              # macro body. By including the '\' in the old string, str.replace removes it.
               old_macro = (
                   '      static_assert(kTaggedSize == kInt32Size);                            \\\n'
-                  '      static_assert(v8::internal::SmiValuesAre31Bits());'
+                  '      static_assert(v8::internal::SmiValuesAre31Bits());                   \\'
               )
               new_macro = (
                   '      // static_assert(kTaggedSize == kInt32Size);  // relaxed for Android cross-compile \\\n'
@@ -564,10 +580,11 @@ jobs:
 
               if old_macro in s:
                   s = s.replace(old_macro, new_macro, 1)
-                  assembler_h.write_text(s)
                   print("patched assembler.h (SMI_COMPARISON_OP assertions)")
               else:
                   print("::warning::SMI_COMPARISON_OP assertions not found in assembler.h")
+
+              assembler_h.write_text(s)
 
               # ----- Post-patch syntax sanity checks -----
               errors = []
@@ -577,10 +594,11 @@ jobs:
                   errors.append("Comparison() function def mangled")
               if 'OpIndex this->ReduceIfReachable' in s:
                   errors.append("REDUCE_OP macro def mangled")
-              # NEW: catch the exact corruption class that broke silently before —
-              # 'this->' immediately followed by '##' can only ever be invalid,
-              # since '##' requires single-token operands on both sides.
-              broken_pastes = re.findall(r'this->\w*##', s)
+              # Catch 'this->' immediately followed by '##' EXCEPT the intentional
+              # macro-body fix: 'return this->ReduceIfReachable##' where ## pastes
+              # ReduceIfReachable+operation and this-> precedes both tokens (valid).
+              broken_pastes = [p for p in re.findall(r'this->\w*##', s)
+                               if 'ReduceIfReachable##' not in p]
               if broken_pastes:
                   errors.append(f"token-paste corruption: {broken_pastes}")
               # NEW: catch accidental double-qualification from re-running logic
