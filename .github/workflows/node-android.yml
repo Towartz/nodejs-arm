@@ -430,33 +430,27 @@ jobs:
           python3 - <<'PYEOF'
           import pathlib
           
-          # Patch define-assembler-macros.inc first (macro definitions used by
-          # AssemblerOpInterface). The macros emit ReduceIfReachable##operation(
-          # calls which need this-> in dependent CRTP context.
-          inc_file = pathlib.Path('deps/v8/src/compiler/turboshaft/define-assembler-macros.inc')
-          if inc_file.exists():
-              inc = inc_file.read_text()
-              inc = inc.replace('ReduceIfReachable##operation(', 'this->ReduceIfReachable##operation(')
-              inc = inc.replace('ReduceIfReachable##type(name, ', 'this->ReduceIfReachable##type(name, ')
-              inc = inc.replace('resolve(left, right,', 'this->resolve(left, right,')
-              inc = inc.replace('resolve(left), resolve(right)', 'this->resolve(left), this->resolve(right)')
-              inc = inc.replace('resolve(input), operation', 'this->resolve(input), operation')
-              inc_file.write_text(inc)
-              print(f"patched {inc_file} (this-> in macros)")
-
           assembler_h = pathlib.Path('deps/v8/src/compiler/turboshaft/assembler.h')
           if assembler_h.exists():
               s = assembler_h.read_text()
 
-              # CRTP two-phase lookup fix: AssemblerOpInterface<Next> : public Next
-              # uses names inherited from Next (a dependent base). Clang in C++20
-              # mode requires this-> qualification for these dependent names.
-              s = s.replace('  : matcher_', '  : this->matcher_')
-              s = s.replace(', matcher_', ', this->matcher_')
+              # CRTP two-phase lookup fix for Clang C++20:
+              # AssemblerOpInterface<Next> : public Next uses names from dependent
+              # base Next. In C++20, Clang requires this-> for dependent names
+              # that aren't found in phase 1 lookup.
+              #
+              # 1. matcher_ init list: qualify with Next:: (this-> isn't valid there)
+              s = s.replace(', matcher_(Asm().output_graph())',
+                            ', Next::matcher_(Asm().output_graph())')
+              # 2. matcher_ in body getter
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
+              # 3. All ReduceIfReachable in macro defs and class body
               s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
+              # 4. resolve() calls in macro expansions (defined at line 5326,
+              #    member template - late-parsed but needs this-> in C++20)
+              s = s.replace('(resolve(', '(this->resolve(')
 
-              print(f"patched {assembler_h} (this-> for CRTP dependent names)")
+              print(f"patched {assembler_h} (CRTP dependent names)")
 
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro
               old_macro = (
