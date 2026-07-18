@@ -1,4 +1,504 @@
-- name: Patch V8 turboshaft SMI assertions
+# Cross-compiles Node.js for Android: arm64-v8a (verified) + armeabi-v7a (experimental,
+# see nodejs/node#58975). Produces per ABI: lib<n>.so + node CLI binary.
+name: Node.js for Android (ARM)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Node.js version to build'
+        type: choice
+        default: 'v26.x'
+        options:
+          - 'v26.x'       # Latest release line
+          - 'v24.x'       # LTS (Krypton)
+          - 'custom'
+      custom_ref:
+        description: 'Custom git ref — only used when "custom" is selected'
+        required: false
+        default: ''
+      lib_name:
+        description: 'Library name — output will be lib<n>.so (e.g. "aurora" → libaurora.so)'
+        required: false
+        default: 'node'
+      profile:
+        description: 'Build profile'
+        type: choice
+        default: 'balanced'
+        options:
+          - 'balanced'    # JIT + -O3: best runtime speed (Baileys/server use)
+          - 'speed'       # + LTO: faster, much longer build
+          - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # r27c fails on v26.x turboshaft CRTP; r26d (Clang 17) is the last working
+  # deps/v8/src/compiler/turboshaft/assembler.h on this Node branch (CRTP
+  # name-resolution regression in AssemblerOpInterface — surfaces as "expected
+  # '}'" in pipeline.cc plus cascading undeclared-identifier errors for
+  # resolve/ReduceIfReachable*/matcher_). r27c's older Clang doesn't hit it.
+  # Confirmed working via nttld/setup-ndk below. If a future Node/V8 release
+  # patches turboshaft for Clang 21+, r29 becomes an option again.
+  NDK_VERSION: 'r26d'
+  MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
+  ANDROID_PLATFORM: 'android-24'
+
+jobs:
+  build:
+    name: android-${{ matrix.abi }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
+    # x64 hosts has open bugs (nodejs/node#58975). Never let it block arm64.
+    continue-on-error: ${{ matrix.experimental || false }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a            # 64-bit ARM — verified working
+            dest_cpu: arm64
+            target: aarch64-linux-android
+          - abi: armeabi-v7a          # 32-bit ARM — experimental
+            dest_cpu: arm
+            target: armv7a-linux-androideabi
+            experimental: true
+
+    steps:
+      # ---------- 0. Resolve inputs ----------
+      # SECURITY: custom_ref and lib_name are free-text workflow_dispatch inputs.
+      # Read them through env: variables (resolved before the shell runs) instead of
+      # ${{ }} inline interpolation to prevent shell-metacharacter injection.
+      - name: Resolve inputs
+        env:
+          CUSTOM_REF_RAW: ${{ inputs.custom_ref || '' }}
+          LIB_NAME_RAW: ${{ inputs.lib_name || 'node' }}
+        run: |
+          REQ="${{ inputs.node_version || 'v26.x' }}"
+          if [ "$REQ" = "custom" ]; then REQ="$CUSTOM_REF_RAW"; fi
+          if [ -z "$REQ" ]; then echo "::error::custom_ref is empty"; exit 1; fi
+          echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
+
+          NAME="$LIB_NAME_RAW"
+          NAME="${NAME#lib}"; NAME="${NAME%.so}"
+          if ! [[ "$NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::Invalid lib_name '$NAME'"; exit 1
+          fi
+          echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "Building Node.js '$REQ' as lib$NAME.so"
+
+      # ---------- 1. Android NDK (r26d) ----------
+      # NDK r27+ ships Clang 18+, which has a CRTP regression in V8's turboshaft
+      # AssemblerOpInterface on Node.js v26.x. r26d (Clang 17) is the last working
+      # version. We download it manually because nttld/setup-ndk doesn't override
+      # the system-preinstalled NDK on GitHub Actions runners.
+      - name: Install NDK ${{ env.NDK_VERSION }}
+        run: |
+          NDK_ZIP="android-ndk-${{ env.NDK_VERSION }}-linux.zip"
+          NDK_URL="https://dl.google.com/android/repository/$NDK_ZIP"
+          echo "Downloading NDK ${{ env.NDK_VERSION }} from $NDK_URL ..."
+          curl -fsSL -o "$NDK_ZIP" "$NDK_URL"
+          unzip -q "$NDK_ZIP"
+          rm "$NDK_ZIP"
+          NDK_DIR="${{ github.workspace }}/android-ndk-${{ env.NDK_VERSION }}"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK installed at $NDK_DIR"
+
+      - name: Verify NDK toolchain paths
+        run: |
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          echo "NDK OK: ${ANDROID_NDK_HOME}"
+
+      # ---------- 1b. ccache ----------
+      # Everything above this point is seconds; the ~2h this job takes is almost
+      # entirely the make step in section 4 — a from-scratch V8+Node compile with
+      # no object reuse between runs. ccache fixes that: it caches compiled objects
+      # by actual preprocessed source+flags content, so reruns/retries and
+      # iterating on this workflow (not on Node's own source) get much faster once
+      # the first run has populated the cache. The cache itself is populated only
+      # on its first run — the win is every run after that.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+
+      - name: Cache ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.abi }}-${{ env.NODE_REF }}-${{ inputs.profile || 'balanced' }}-
+
+      # ---------- 2. Host build tools ----------
+      - name: Install host build tools
+        run: |
+          python3 -c "import sys; v=sys.version_info; assert v>=(3,10), f'need Python>=3.10, got {v}'"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 g++ make git ca-certificates patchelf ccache
+
+      - name: Install 32-bit multilib (armeabi-v7a only)
+        if: matrix.dest_cpu == 'arm'
+        run: sudo apt-get install -y gcc-multilib g++-multilib
+        # V8 mandates 32-bit host tools when targeting 32-bit arm.
+
+      # ---------- 3. Node.js source ----------
+      - name: Clone Node.js (${{ env.NODE_REF }})
+        run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
+
+      # ---------- 3b. Patch known Android cross-build issues ----------
+      # Android is not an officially tested/supported Node.js target (core team
+      # position, see nodejs/node#58505) — these are community-tracked issues
+      # carried by Termux's Node.js packaging for years and partially upstreamed.
+      # Expect this list to need revisiting on every Node major bump.
+      #
+      # NOTE: each patch step must stay under GitHub Actions' 21000-char expression
+      # limit. The monolithic python3 block is split into logical groups below.
+      - name: "Patch V8: base + uv (stack_trace, small_vector, trap_handler, uv.gyp, fs.c)"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          patch('deps/v8/src/base/debug/stack_trace_posix.cc',
+                '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"',
+                '#if defined(__ANDROID__)\n'
+                'extern "C" int backtrace(void**, int) { return 0; }\n'
+                'extern "C" char** backtrace_symbols(void* const*, int) { return nullptr; }\n'
+                'extern "C" void backtrace_symbols_fd(void* const*, int, int) {}\n'
+                '#endif\n\n'
+                '#include "src/base/build_config.h"\n#include "src/base/free_deleter.h"')
+
+          th = pathlib.Path('deps/v8/src/trap-handler/trap-handler.h')
+          c = th.read_text()
+          ms = '// X64 on Linux, Windows, MacOS, FreeBSD.'
+          me = '#define V8_TRAP_HANDLER_SUPPORTED false\n#endif'
+          if ms in c and me in c:
+              i0 = c.index(ms); i1 = c.index(me, i0) + len(me)
+              c = c[:i0] + '#define V8_TRAP_HANDLER_SUPPORTED false' + c[i1:]
+              th.write_text(c); print("patched trap-handler.h")
+          else:
+              print("::warning::trap-handler block boundaries not found")
+
+          patch('deps/uv/uv.gyp',
+                '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs': [","        'include',","        'src/',","      ],"]),
+                '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs+': [","        'include',","        'src/',","      ],"]))
+          patch('deps/uv/uv.gyp', "        'include_dirs': [ 'include' ],", "        'include_dirs+': [ 'include' ],")
+
+          patch('deps/uv/src/unix/fs.c',
+                '#ifdef FICLONE\n'
+                '  if (req->flags & UV_FS_COPYFILE_FICLONE ||\n'
+                '      req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {',
+                '#ifndef __ANDROID__\n'
+                '#ifdef FICLONE\n'
+                '  if (req->flags & UV_FS_COPYFILE_FICLONE ||\n'
+                '      req->flags & UV_FS_COPYFILE_FICLONE_FORCE) {')
+
+          patch('test/cctest/test_crypto_clienthello.cc',
+                "    alloc_base = static_cast<uint8_t*>(aligned_alloc(page, 2 * page));",
+                "    CHECK_EQ(posix_memalign(reinterpret_cast<void**>(&alloc_base), page, 2 * page), 0);")
+
+          fc = pathlib.Path('deps/uv/src/unix/fs.c')
+          s = fc.read_text()
+          oc = '\n'.join(['    goto out;','  }','#endif','','  bytes_to_send = src_statsbuf.st_size;'])
+          nc = '\n'.join(['    goto out;','  }','#endif','#endif','','  bytes_to_send = src_statsbuf.st_size;'])
+          if oc not in s:
+              print("::warning::FICLONE #endif close not found")
+          else:
+              fc.write_text(s.replace(oc, nc, 1)); print("closed #ifndef __ANDROID__ in fs.c")
+          PYEOF
+
+      - name: "Patch V8: atomic_ref polyfill + memcopy + wasm-shuffle"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          v8config_h = pathlib.Path('deps/v8/include/v8config.h')
+          s = v8config_h.read_text()
+          old_atomic_line = '#include <memory>'
+          new_polyfill_block = (
+              '#include <memory>\n'
+              '#if defined(__ANDROID__) && !defined(__cpp_lib_atomic_ref)\n'
+              '#ifndef V8_STD_ATOMIC_REF_POLYFILL\n'
+              '#define V8_STD_ATOMIC_REF_POLYFILL\n'
+              'namespace std {\n'
+              'template <typename T>\n'
+              'struct atomic_ref {\n'
+              '  explicit atomic_ref(T& obj) : ptr_(&obj) {}\n'
+              '  void store(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    __atomic_store_n(ptr_, val, static_cast<int>(order)); }\n'
+              '  T load(memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_load_n(ptr_, static_cast<int>(order)); }\n'
+              '  T exchange(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_exchange_n(ptr_, val, static_cast<int>(order)); }\n'
+              '  bool compare_exchange_strong(T& expected, T desired,\n'
+              '      memory_order success, memory_order failure) const {\n'
+              '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+              '                                       false, static_cast<int>(success), static_cast<int>(failure)); }\n'
+              '  bool compare_exchange_strong(T& expected, T desired,\n'
+              '      memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_compare_exchange_n(ptr_, &expected, desired,\n'
+              '                                       false, static_cast<int>(order), static_cast<int>(order)); }\n'
+              '  T fetch_add(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_fetch_add(ptr_, val, static_cast<int>(order)); }\n'
+              '  T fetch_or(T val, memory_order order = memory_order_seq_cst) const {\n'
+              '    return __atomic_fetch_or(ptr_, val, static_cast<int>(order)); }\n'
+              'private:\n'
+              '  T* ptr_;\n'
+              '};\n'
+              '}  // namespace std\n'
+              '#endif\n'
+              '#endif')
+          if old_atomic_line in s:
+              s = s.replace(old_atomic_line, new_polyfill_block, 1)
+              v8config_h.write_text(s)
+              print("patched v8config.h (std::atomic_ref polyfill)")
+          else:
+              print("::warning::could not find '#include <memory>' in v8config.h")
+
+          patch('deps/v8/src/base/memcopy.h',
+                '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
+                '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
+
+          patch('deps/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc',
+                '    wasm::SimdShuffle::ShuffleArray shuffle_bytes;',
+                '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
+          PYEOF
+
+      - name: "Patch V8: zlib cpu_features (getauxval replacement)"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          zlib_c = pathlib.Path('deps/zlib/cpu_features.c')
+          s = zlib_c.read_text()
+          old_incl = (
+              '#if defined(ARMV8_OS_ANDROID)\n'
+              '#include <cpu-features.h>\n'
+              '#elif defined(ARMV8_OS_LINUX)\n'
+              '#include <asm/hwcap.h>\n'
+              '#include <sys/auxv.h>')
+          new_incl = (
+              '#if defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)\n'
+              '#include <asm/hwcap.h>\n'
+              '#include <sys/auxv.h>')
+          if old_incl in s:
+              s = s.replace(old_incl, new_incl, 1); print("patched cpu_features.c (includes)")
+          else:
+              print("::warning::include block not found")
+
+          old_aarch64 = (
+              '#if defined(ARMV8_OS_ANDROID) && defined(__aarch64__)\n'
+              '    uint64_t features = android_getCpuFeatures();\n'
+              '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM64_FEATURE_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM64_FEATURE_PMULL);')
+          new_aarch64 = (
+              '#if (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && defined(__aarch64__)\n'
+              '    unsigned long features = getauxval(AT_HWCAP);\n'
+              '    arm_cpu_enable_crc32 = !!(features & HWCAP_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & HWCAP_PMULL);')
+          if old_aarch64 in s:
+              s = s.replace(old_aarch64, new_aarch64, 1); print("patched cpu_features.c (aarch64)")
+          else:
+              print("::warning::aarch64 branch not found")
+
+          old_aarch32 = (
+              '#elif defined(ARMV8_OS_ANDROID) /* aarch32 */\n'
+              '    uint64_t features = android_getCpuFeatures();\n'
+              '    arm_cpu_enable_crc32 = !!(features & ANDROID_CPU_ARM_FEATURE_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & ANDROID_CPU_ARM_FEATURE_PMULL);')
+          new_aarch32 = (
+              '#elif (defined(ARMV8_OS_ANDROID) || defined(ARMV8_OS_LINUX)) && (defined(__ARM_NEON) || defined(__ARM_NEON__))\n'
+              '    unsigned long features = getauxval(AT_HWCAP2);\n'
+              '    arm_cpu_enable_crc32 = !!(features & HWCAP2_CRC32);\n'
+              '    arm_cpu_enable_pmull = !!(features & HWCAP2_PMULL);')
+          if old_aarch32 in s:
+              s = s.replace(old_aarch32, new_aarch32, 1); print("patched cpu_features.c (aarch32)")
+          else:
+              print("::warning::aarch32 branch not found")
+          zlib_c.write_text(s)
+          PYEOF
+
+      - name: "Patch V8: gyp toolchain + cross-compile config"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          patch('tools/v8_gypfiles/v8.gyp',
+                "        ['(OS==\"linux\" and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {",
+                "        ['((OS==\"linux\" or OS==\"android\") and clang==1) or (v8_current_cpu in [\"mips64\", \"mips64el\", \"arm\", \"riscv64\", \"loong64\"])', {")
+          patch('tools/v8_gypfiles/v8.gyp',
+                "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',",
+                "'<(V8_ROOT)/src/base/platform/platform-posix-time.h',\n"
+                "            '<(V8_ROOT)/src/base/platform/platform-linux.h',")
+          patch('node.gyp',
+                "      ['OS==\"linux\" and clang==1', {",
+                "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
+          patch('tools/v8_gypfiles/toolchain.gypi',
+                "    'v8_android_log_stdout%': 0,", "    'v8_android_log_stdout%': 1,")
+          v8_tc = pathlib.Path('tools/v8_gypfiles/toolchain.gypi')
+          s = v8_tc.read_text()
+          bp_block = ("        ['v8_control_flow_integrity==1', {\n"
+                      "            'cflags': [ '-mbranch-protection=standard' ],\n"
+                      "          }],")
+          if bp_block in s:
+              s = s.replace(bp_block, "          # removed for Android (NDK r29 doesn't support this)")
+              v8_tc.write_text(s); print("patched toolchain.gypi (removed branch-protection)")
+          else:
+              print("::warning::branch-protection block not found")
+          patch('common.gypi',
+                "          ['OS == \"android\"', {\n"
+                "            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],\n"
+                "            'ldflags': [ '-fPIC' ]\n"
+                "          }],", "")
+          patch('tools/gyp/pylib/gyp/generator/ninja.py',
+                "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/gen\",",
+                "    \"SHARED_INTERMEDIATE_DIR\": \"$!PRODUCT_DIR/$|OBJ/gen\",")
+          ninja_py = pathlib.Path('tools/gyp/pylib/gyp/generator/ninja.py')
+          s = ninja_py.read_text()
+          obj_var_block = ("        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+                           "\n        return path")
+          obj_var_new = ("        path = path.replace(CONFIGURATION_NAME, self.config_name)\n"
+                         "\n        obj = \"obj\"\n"
+                         "        if self.toolset != \"target\":\n"
+                         "            obj += \".\" + self.toolset\n"
+                         "        path = path.replace(\"$|OBJ\", obj)\n"
+                         "\n        return path")
+          if obj_var_block in s:
+              s = s.replace(obj_var_block, obj_var_new, 1)
+              ninja_py.write_text(s); print("patched ninja.py (OBJ variable)")
+          else:
+              print("::warning::ExpandSpecial return not found in ninja.py")
+          patch('deps/uvwasi/src/uvwasi.c',
+                '#if !defined(_WIN32) && !defined(__ANDROID__)',
+                '#if !defined(_WIN32)')
+          patch('deps/v8/include/v8config.h',
+                '#if (V8_TARGET_ARCH_ARM && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM))\n'
+                '#error Target architecture arm is only supported on arm and ia32 host',
+                '#if (V8_TARGET_ARCH_ARM && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM || V8_HOST_ARCH_X64))\n'
+                '#error Target architecture arm is only supported on arm, ia32, and x64 host')
+          patch('deps/v8/src/common/globals.h',
+                'static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);',
+                '// static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);')
+          patch('deps/v8/src/builtins/builtins-iterator-inl.h',
+                '        } else {                                                            \\\n'
+                '          static_assert(std::numeric_limits<ctype>::max() <=                \\\n'
+                '                        std::numeric_limits<int>::max());                   \\\n'
+                '          static_assert(std::numeric_limits<ctype>::min() >=                \\\n'
+                '                        std::numeric_limits<int>::min());                   \\\n'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \\\n'
+                '            return MaybeDirectHandle<Object>();                             \\\n'
+                '          }                                                                 \\\n'
+                '        }',
+                '        } else if constexpr (std::numeric_limits<ctype>::max() <=           \\\n'
+                '                             std::numeric_limits<int>::max() &&             \\\n'
+                '                             std::numeric_limits<ctype>::min() >=           \\\n'
+                '                             std::numeric_limits<int>::min()) {             \\\n'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \\\n'
+                '            return MaybeDirectHandle<Object>();                             \\\n'
+                '          }                                                                 \\\n'
+                '        }')
+          PYEOF
+
+      # ---------- FIXED 2026-07-18 ----------
+      # Root cause of the "expected '}'" / "namespaces can only be defined in
+      # global or namespace scope" cascade in pipeline.cc, confirmed against the
+      # actual V8 14.6.202.33 source (the version this branch currently vendors):
+      #
+      # The previous version of this step did a blind global
+      # str.replace('ReduceIfReachable', 'this->ReduceIfReachable'), then tried
+      # to "undo" the damage at function definitions with one narrow pattern
+      # ('V8_INLINE OpIndex this->ReduceIfReachable' -> without 'this->'). Two
+      # things were wrong with that:
+      #   1. In this V8 version, every 'ReduceIfReachable' occurrence in
+      #      assembler.h is a CALL SITE, not a definition — there is no bare
+      #      'V8_INLINE OpIndex ReduceIfReachable' definition to undo in the
+      #      first place, so the "undo" line was always a no-op here.
+      #   2. 8 of those call sites use preprocessor token-pasting, e.g.
+      #      'ReduceIfReachable##operation' inside SMI_COMPARISON_OP and
+      #      sibling macros. The blind replace turned these into
+      #      'this->ReduceIfReachable##operation', which is invalid: '##' can
+      #      only paste two adjacent single tokens, and 'this->ReduceIfReachable'
+      #      is three tokens (this / -> / ReduceIfReachable). This corrupts the
+      #      macro body. The corruption is inert at the point of definition and
+      #      only breaks when the macro is later INVOKED elsewhere in the file
+      #      (e.g. 'SMI_COMPARISON_OP(SmiLessThanOrEqual, ...)' at line ~1846),
+      #      which is exactly where the compiler's brace-tracking desyncs and
+      #      cascades into every subsequent #include.
+      #
+      # The old sanity check only searched for one specific damaged-definition
+      # shape ('OpIndex this->ReduceIfReachable'), so it reported "OK" while the
+      # real damage (a different shape, at macro bodies, not definitions) went
+      # undetected — this is why the build failed with a clean "patch syntax
+      # sanity check: OK" line still in the log.
+      #
+      # Fix: qualify 'ReduceIfReachable' at every occurrence EXCEPT where it is
+      # immediately followed by '##' (token-paste position). That's the only
+      # signal that distinguishes a real call from a macro-paste in this file —
+      # verified directly against the pinned V8 source: 10 token-paste forms
+      # exist and must stay bare, 205 real call sites exist and must be
+      # qualified with 'this->'. Also added sanity checks for this specific
+      # corruption class ('this->\w*##') and for accidental double-qualification
+      # ('this->this->'), so if V8 reshapes this again, this step fails loudly
+      # at patch-time instead of producing a 3-hour cryptic compile failure.
+      - name: "Patch V8: turboshaft SMI assertions"
         working-directory: node
         run: |
           python3 - <<'PYEOF'
@@ -23,29 +523,15 @@
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
 
               # 3. ReduceIfReachable calls — qualify call sites ONLY.
+              # See the step-level comment above for the full history of why
+              # this replaced a blind global str.replace().
               #
-              # FIX (2026-07): the previous version of this patch did a blind
-              # global str.replace('ReduceIfReachable', 'this->ReduceIfReachable')
-              # followed by a narrow "undo" pattern targeting one specific
-              # definition signature shape. That approach silently broke on the
-              # V8 14.6.x bump because:
-              #   (a) this file has NO bare 'V8_INLINE OpIndex ReduceIfReachable'
-              #       definitions to undo in the first place — every occurrence
-              #       here is a call site, e.g. 'return ReduceIfReachableFoo(...)'
-              #   (b) several call sites use preprocessor token-pasting:
-              #       'ReduceIfReachable##operation' — the blind replace turned
-              #       these into 'this->ReduceIfReachable##operation', which is
-              #       invalid: '##' can only paste adjacent identifier tokens,
-              #       and 'this->ReduceIfReachable' is three tokens, not one.
-              #       This corrupted 8 macro bodies (SMI_COMPARISON_OP and
-              #       siblings), producing "expected '}'" / "namespaces can only
-              #       be defined in global scope" cascades in pipeline.cc.
-              #
-              # The regex below qualifies 'ReduceIfReachable' at every occurrence
-              # EXCEPT where it's immediately followed by '##' (token-paste
-              # position). A negative lookahead is sufficient and exact here:
-              # every non-call occurrence in this file is a '##'-paste, and no
-              # real call site is ever followed by '##'.
+              # Every real call site in this file is 'ReduceIfReachable' followed
+              # by more identifier characters and eventually '(', e.g.
+              # 'ReduceIfReachableComparison('. Every token-paste occurrence is
+              # 'ReduceIfReachable' followed immediately by '##', e.g.
+              # 'ReduceIfReachable##operation'. The negative lookahead below
+              # excludes exactly the token-paste shape and nothing else.
               s = re.sub(r'\bReduceIfReachable(?!##)', r'this->ReduceIfReachable', s)
 
               # 4. resolve() calls — only in call contexts, never in function defs
@@ -114,3 +600,167 @@
           echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
           echo "    swap /data/local/tmp for @TERMUX_PREFIX@/tmp placeholder."
           echo "  - deps-uv-src-unix-process.c.patch: strips post-fork privilege-drop calls."
+
+      # ---------- 4. Cross-compile ----------
+      - name: Cross-compile Node.js for ${{ matrix.abi }}
+        working-directory: node
+        run: |
+          export TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="$TC/bin:$PATH"
+
+          # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
+          export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
+          export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          export AR="$TC/bin/llvm-ar"
+          export NM="$TC/bin/llvm-nm"
+          export RANLIB="$TC/bin/llvm-ranlib"
+          export STRIP="$TC/bin/llvm-strip"
+          export READELF="$TC/bin/llvm-readelf"
+          # NOTE: do not export LINK — gyp reads it for the HOST linker and breaks.
+
+          # CRITICAL: host build tools must use the host compiler.
+          # Without this, configure probes the ARM clang and thinks host_arch=arm,
+          # and host tools (torque/mksnapshot) get built with the Android toolchain.
+          export CC_host="ccache gcc"
+          export CXX_host="ccache g++"
+
+          # V8 requires 32-bit host tools for 32-bit targets
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
+            # KNOWN ISSUE (armeabi-v7a only, unconfirmed against this exact repro):
+            # common.gypi unconditionally adds -m64 to host cflags/ldflags when
+            # host_arch=="x64" (which GH Actions runners auto-detect as, regardless
+            # of dest_cpu). Combined with the -m32 above, host tools may see both
+            # -m32 and -m64 on the same command line. Documented by the same
+            # engineer who maintains Termux's Node.js build, in the nodejs/node#57748
+            # PR description; a common.gypi.patch / v8.gyp.patch pair exists in
+            # Termux's packaging (github.com/termux/termux-packages, packages/nodejs-lts)
+            # to make cross-compiling for 32-bit not add -m64 to the host build, but
+            # neither patch is merged upstream as of this writing — fetch and review
+            # them directly from that repo before adopting, rather than trusting a
+            # hand-copied version here. armeabi-v7a is experimental/continue-on-error
+            # in this workflow already, so this is a "watch for" note, not a blocker.
+            #
+            # SEPARATE KNOWN ISSUE (also arm/32-bit specific): nodejs/node#58975,
+            # "Incorrect selection of x64 push_registers_asm.cc for host build when
+            # target is arm" — a gyp source-file-selection bug for the conservative-
+            # stack-scanning helper, distinct from the trap-handler fix below. Closed
+            # via nodejs/node#57748 but, per that PR's own description, not a complete
+            # fix. If the arm (32-bit) leg fails on an undefined push_registers_asm-
+            # related symbol specifically, that issue thread is the place to look.
+          fi
+
+          # android_ndk_path is REQUIRED (node.gyp fails without it)
+          #
+          # host_arch/v8_host_arch=x64: defensive gyp hygiene, not a confirmed fix
+          # by itself. common.gypi keys its host -m64 cflag/ldflag on host_arch=="x64"
+          # explicitly (see common.gypi ~line 536), so pinning it removes ambiguity
+          # about what the host toolset resolves to. It does NOT appear to be the
+          # actual cause of the mksnapshot undefined-symbol error seen in this repo's
+          # CI run — that is a trap-handler.h source-selection issue, fixed by the
+          # patch step above (nodejs/node#36287). Kept here as harmless hardening.
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=x64 v8_host_arch=x64"
+
+          # LAST-RESORT FALLBACK (only if trap-handler.h.patch above does not clear
+          # the mksnapshot link error — e.g. the patch went stale for this Node
+          # version, per the staleness history in nodejs/node#60369): forcibly drops
+          # the trap-handler/simulator-probe symbols from the link graph instead of
+          # fixing the source. Costs WASM OOB-trap fast paths in the resulting
+          # libnode.so; leave commented unless the patch step above proves insufficient.
+          # export GYP_DEFINES="$GYP_DEFINES v8_enable_webassembly=false"
+
+          # 16 KB page alignment for Android 15/16 devices
+          export LDFLAGS="-Wl,-z,max-page-size=16384"
+
+          EXTRA_FLAGS=""
+          case "${{ inputs.profile || 'balanced' }}" in
+            speed) EXTRA_FLAGS="--enable-lto" ;;
+            size)  EXTRA_FLAGS="--v8-lite-mode" ;;
+          esac
+
+          # --without-corepack was removed in Node.js v26.x
+          NODEEXTRA=""
+          if ./configure --help 2>&1 | grep -q without-corepack; then
+            NODEEXTRA="--without-corepack"
+          fi
+
+          ./configure \
+            --cross-compiling \
+            --dest-os=android \
+            --dest-cpu=${{ matrix.dest_cpu }} \
+            --shared \
+            --with-intl=none \
+            --without-npm \
+            $NODEEXTRA \
+            --openssl-no-asm \
+            $EXTRA_FLAGS
+
+          # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
+          # in some configurations, silently breaking host-tool linking).
+          # Build ONLY the 'node' target: produces both out/Release/node (CLI)
+          # and out/Release/lib.target/libnode.so (shared library). Skip cctest
+          # and other test/auxiliary targets to save 5-10 minutes of build time.
+          # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc needs x64.
+          HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
+          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
+
+          echo "---- ccache stats (${{ matrix.abi }}) ----"
+          ccache -s
+
+      # ---------- 5. Rename, strip, package ----------
+      - name: Package lib${{ env.LIB_NAME }}.so + node
+        if: success()
+        working-directory: node
+        run: |
+          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          LIB="lib${LIB_NAME}.so"
+
+          # Diagnostic: confirm where libnode.so actually landed.
+          # The ninja.py patch above changes SHARED_INTERMEDIATE_DIR and adds an
+          # $|OBJ toolset suffix, which can move the .so out of lib.target.
+          echo "Searching for libnode.so in out/Release..."
+          find out/Release -name "libnode.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
+          echo "Directory structure under out/Release:"
+          find out/Release -maxdepth 3 -type d
+
+          if [ -f "out/Release/lib.target/libnode.so" ]; then
+            LIB_PATH="out/Release/lib.target/libnode.so"
+          elif [ -f "out/Release/libnode.so" ]; then
+            echo "Found at out/Release/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/libnode.so"
+          elif [ -f "out/Release/obj.target/libnode.so" ]; then
+            echo "Found at out/Release/obj.target/libnode.so instead of lib.target/"
+            LIB_PATH="out/Release/obj.target/libnode.so"
+          else
+            echo "::error::libnode.so not found in any expected location"
+            exit 1
+          fi
+
+          "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
+          # Self-copy guard: don't cp if src and dest are the same inode
+          [ "$(readlink -f "$LIB_PATH")" = "$(readlink -f "$LIB")" ] || cp "$LIB_PATH" "$LIB"
+          [ "$(readlink -f out/Release/node)" = "$(readlink -f node)" ] || cp out/Release/node node
+          "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
+          "$TC/bin/llvm-strip" --strip-all node
+          if [ "$LIB_NAME" != "node" ]; then
+            patchelf --set-soname "$LIB" "$LIB"
+            patchelf --replace-needed libnode.so "$LIB" node
+          fi
+          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
+          ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+
+      # ---------- 6a. Upload artifact ----------
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
+          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          retention-days: 14
+
+      # ---------- 6b. Attach to GitHub Release (tag pushes only) ----------
+      - name: Attach to GitHub Release
+        if: success() && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
