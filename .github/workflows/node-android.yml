@@ -429,16 +429,18 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import pathlib
+          import re
           
           assembler_h = pathlib.Path('deps/v8/src/compiler/turboshaft/assembler.h')
           if assembler_h.exists():
               s = assembler_h.read_text()
 
               # CRTP two-phase lookup fix for Clang C++20:
-              # AssemblerOpInterface<Next> : public Next uses names from dependent
-              # base Next and its own members. In C++20, Clang doesn't find
-              # names declared later in the class from member function bodies
-              # (even with late parsing). We add forward decls and this->.
+              # AssemblerOpInterface<Next> : public Next uses non-dependent member
+              # names from the class body. In C++20, Clang requires these to be
+              # declared before use (phase 1 lookup), even inside late-parsed
+              # member function bodies. We use this-> qualification to make them
+              # dependent (deferred to phase 2).
               #
               # 1. matcher_ init list: qualify with Next::
               s = s.replace(', matcher_(Asm().output_graph())',
@@ -447,9 +449,12 @@ jobs:
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
               # 3. All ReduceIfReachable (inherited from Next via CRTP)
               s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
-              # 4. Forward-declare resolve so Clang finds it before line 5326
-              s = s.replace('class AssemblerOpInterface : public Next {',
-                            "class AssemblerOpInterface : public Next {\n\n  template <typename Rep>\n\n  V<Rep> resolve(const V<Rep>& v);")
+              # 4. resolve left/right calls (non-dependent member, needed inside
+              #    macro expansions and other member fn bodies before its definition)
+              s = re.sub(r'(?<![.>:\w])resolve\(', 'this->resolve(', s)
+              # 5. Comparison/IntPtrLessThan — same two-phase lookup issue
+              s = re.sub(r'(?<![.>:\w])Comparison\(', 'this->Comparison(', s)
+              s = re.sub(r'(?<![.>:\w])IntPtrLessThan\(', 'this->IntPtrLessThan(', s)
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
