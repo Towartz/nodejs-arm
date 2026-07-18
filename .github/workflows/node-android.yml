@@ -570,19 +570,21 @@ jobs:
               print(f"patched {assembler_h} (CRTP dependent names)")
 
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro.
-              # IMPORTANT: the old string MUST include the trailing '\' on the second line
-              # (the macro-continuation backslash). If we only match up to '();' and leave
-              # the trailing '\' in place, the new line's '//' comment will swallow the
-              # next physical line (the return statement) via phase-2 line splicing — the
-              # backslash joins the return line into the comment, silently destroying the
-              # macro body. By including the '\' in the old string, str.replace removes it.
+              # IMPORTANT: The second line of new_macro MUST NOT end with '\'. Here's why:
+              # Phase 2 (line splicing) runs before phase 3 (comment recognition). With
+              # the old trailing '\' on BOTH lines, the '\' at end of line 1 joins line 1+2,
+              # then '\' at end of joined line picks up line 3 (return statement), and
+              # the '//' comment from line 1 swallows EVERYTHING including the return
+              # statement and closing braces of the macro. By omitting '\' from the
+              # second line of new_macro, the comment only covers the two static_assert
+              # lines (line 1+2 spliced), and the return statement on line 3 is preserved.
               old_macro = (
                   '      static_assert(kTaggedSize == kInt32Size);                            \\\n'
                   '      static_assert(v8::internal::SmiValuesAre31Bits());                   \\'
               )
               new_macro = (
                   '      // static_assert(kTaggedSize == kInt32Size);  // relaxed for Android cross-compile \\\n'
-                  '      // static_assert(v8::internal::SmiValuesAre31Bits());  // relaxed for Android cross-compile   \\'
+                  '      // static_assert(v8::internal::SmiValuesAre31Bits());  // relaxed for Android cross-compile   '
               )
 
               if old_macro in s:
