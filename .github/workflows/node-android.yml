@@ -430,30 +430,33 @@ jobs:
           python3 - <<'PYEOF'
           import pathlib
           
+          # Patch define-assembler-macros.inc first (macro definitions used by
+          # AssemblerOpInterface). The macros emit ReduceIfReachable##operation(
+          # calls which need this-> in dependent CRTP context.
+          inc_file = pathlib.Path('deps/v8/src/compiler/turboshaft/define-assembler-macros.inc')
+          if inc_file.exists():
+              inc = inc_file.read_text()
+              inc = inc.replace('ReduceIfReachable##operation(', 'this->ReduceIfReachable##operation(')
+              inc = inc.replace('ReduceIfReachable##type(name, ', 'this->ReduceIfReachable##type(name, ')
+              inc = inc.replace('resolve(left, right,', 'this->resolve(left, right,')
+              inc = inc.replace('resolve(left), resolve(right)', 'this->resolve(left), this->resolve(right)')
+              inc = inc.replace('resolve(input), operation', 'this->resolve(input), operation')
+              inc_file.write_text(inc)
+              print(f"patched {inc_file} (this-> in macros)")
+
           assembler_h = pathlib.Path('deps/v8/src/compiler/turboshaft/assembler.h')
           if assembler_h.exists():
               s = assembler_h.read_text()
 
-              # CRTP fix for Clang two-phase name lookup in C++20 mode.
-              # AssemblerOpInterface<Next> : public Next uses names from the derived
-              # class (Next). Clang requires this-> qualification for these in C++20
-              # two-phase lookup in template base classes.
-              # The fix is needed because NDK r26d's Clang 17 in C++20 mode is strict
-              # about this, even though older Clang versions in C++17 mode were not.
-              # 
-              # 1. this->matcher_ in constructor initializer list and body
+              # CRTP two-phase lookup fix: AssemblerOpInterface<Next> : public Next
+              # uses names inherited from Next (a dependent base). Clang in C++20
+              # mode requires this-> qualification for these dependent names.
               s = s.replace('  : matcher_', '  : this->matcher_')
               s = s.replace(', matcher_', ', this->matcher_')
-              # 2. this->ReduceIfReachable in DECL_MULTI_REP_BINOP_V macro
-              s = s.replace('ReduceIfReachable##operation(', 'this->ReduceIfReachable##operation(')
-              # 3. this->ReduceIfReachable in other macros (DECL_MULTI_REP_BINOP, etc.)
-              # This covers TypeHint, GenericBinop, GenericUnop, ToNumberOrNumeric
-              s = s.replace('ReduceIfReachable(name, ', 'this->ReduceIfReachable(name, ')
-              # 4. this->resolve in macro bodies
-              s = s.replace('resolve(left, right,', 'this->resolve(left, right,')
-              s = s.replace('resolve(this->value(),', 'this->resolve(this->value(),')
+              s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
+              s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
 
-              print("patched assembler.h (CRTP dependent names: matcher_, ReduceIfReachable*, resolve)")
+              print(f"patched {assembler_h} (this-> for CRTP dependent names)")
 
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro
               old_macro = (
