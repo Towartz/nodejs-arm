@@ -610,19 +610,15 @@ jobs:
           # PushAllRegistersAndIterateStack goes missing from
           # libv8_base_without_compiler.a for the host toolset — which is
           # exactly the "undefined symbol: PushAllRegistersAndIterateStack"
-          # mksnapshot linker error. Do not patch this file. The real
-          # armeabi-v7a-only problem is that push_registers_asm.cc for x64
-          # (the file gyp correctly picks for the host toolset, since
-          # host_arch=="x64" on every GH Actions runner) contains raw
-          # 64-bit-register inline asm with no arch #ifdef of its own — so
-          # it must be compiled by a genuinely 64-bit host compiler. If
-          # CFLAGS_host=-m32 (set below, armeabi-v7a only) reaches the
-          # compiler while this file is built, you get "bad register name"
-          # errors regardless of which source gyp selected. That is a
-          # compiler-flag problem, not a source-selection problem — see the
-          # HOST_M64 override in the cross-compile step, and make sure it's
-          # applied consistently (including during ./configure, not just
-          # during make — see the note at that step).
+          # mksnapshot linker error. Do not patch this file. Instead, make
+          # sure GYP_DEFINES' host_arch and the host compiler's actual
+          # -m32/-m64 mode agree with each other for whichever leg is
+          # building — see the host_arch/CFLAGS_host block in the
+          # cross-compile step below for the full explanation (both errors
+          # in this thread — the "bad register name" one and the
+          # "undefined symbol: PushAllRegistersAndIterateStack" one — trace
+          # back to that same host_arch/compiler-mode mismatch, just in
+          # opposite directions).
           # ============================================================
           PYEOF
 
@@ -680,52 +676,64 @@ jobs:
           export CXX_host="ccache g++"
 
           # ============================================================
-          # CORRECTION: the old comment here read "V8 requires 32-bit host
-          # tools for 32-bit targets" and set CFLAGS_host/CXXFLAGS_host/
-          # LDFLAGS_host=-m32 whenever dest_cpu=="arm". That assumption is
-          # NOT correct for this build. mksnapshot/torque run natively ON
-          # the x64 CI runner — they generate a snapshot/bytecode artifact
-          # that gets embedded into the target binary, but the *tool itself*
-          # executes as a normal x64 host binary, independent of dest_cpu.
-          # There is no requirement to compile host tools as 32-bit just
-          # because the final target is 32-bit ARM.
+          # host_arch must match dest_cpu's requirement, per V8's own
+          # compile-time assertions in deps/v8/include/v8config.h (lines
+          # ~962-990). Verified directly against this repo's v24.9.0
+          # checkout:
           #
-          # Forcing -m32 here is what actually caused the "bad register
-          # name `%rbp'" / `%rsp'` etc. assembler errors on the armeabi-v7a
-          # leg: deps/v8/src/heap/base/asm/x64/push_registers_asm.cc (which
-          # v8.gyp correctly selects for the host toolset, since
-          # host_arch=="x64" on every GH Actions runner — see the note in
-          # the patch step above) contains raw 64-bit-register inline
-          # assembly with no arch #ifdef of its own. Feeding that file to a
-          # compiler running in forced -m32 mode breaks it outright,
-          # regardless of what gyp source-selection logic decided — this
-          # was never a source-selection problem.
+          #   target arm64 : host must be x64 or arm64   (V8_HOST_ARCH_X64 || V8_HOST_ARCH_ARM64)
+          #   target arm    : host must be ia32 or arm    (V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM)   -- x64 is NOT accepted
           #
-          # A HOST_M64="-m64" override existed further down (on the `make`
-          # command only) specifically to fight this same -m32, but
-          # ./configure below reads CFLAGS_host/CXXFLAGS_host/LDFLAGS_host
-          # from the environment and bakes them into config.gypi *before*
-          # that make-time override ever runs — so -m32 could still leak
-          # into host compiles that happen via config.gypi's flags rather
-          # than the make command line, depending on gyp's generator. The
-          # clean fix is to never set -m32 for the host in the first place.
+          # These V8_HOST_ARCH_* macros are not read from GYP_DEFINES —
+          # they come from the compiler's own predefined macros
+          # (__x86_64__ => V8_HOST_ARCH_X64, __i386__ => V8_HOST_ARCH_IA32),
+          # which in turn depend on which of -m64/-m32 the host compiler
+          # actually runs with. Confirmed by direct test in this sandbox:
+          #   echo | g++ -m64 -E -dM -x c++ - | grep __x86_64__   -> defined
+          #   echo | g++ -m32 -E -dM -x c++ - | grep __i386__     -> defined
+          # So for the armeabi-v7a (arm) leg, the host compiler MUST run
+          # with -m32 (giving V8_HOST_ARCH_IA32), or every host-toolset
+          # translation unit that includes v8config.h hits
+          # "#error Target architecture arm is only supported on arm and
+          # ia32 host" at the preprocessor stage — this is exactly the
+          # error seen when -m32 was removed from CFLAGS_host for this leg.
           #
-          # gcc-multilib/g++-multilib (installed in the "Install 32-bit
-          # multilib" step above) are harmless to leave installed even
-          # though they're no longer required by this step; they don't
-          # affect this build now that host tools stay native x64.
-          # ============================================================
+          # This means GYP_DEFINES' host_arch must track the SAME choice,
+          # or gyp and the compiler disagree about what "host" is:
+          #   - If GYP_DEFINES says host_arch=x64 while the compiler runs
+          #     -m32, gyp picks deps/v8/src/heap/base/asm/x64/push_registers_asm.cc
+          #     for the host toolset (v8.gyp's host_arch=="x64" branch —
+          #     see tools/v8_gypfiles/v8.gyp ~line 1980), but that file is
+          #     raw 64-bit-register inline asm with no #ifdef guard of its
+          #     own, so a -m32 compiler chokes on it with "bad register
+          #     name `%rbp'" and similar — this was the FIRST error in this
+          #     thread.
+          #   - If GYP_DEFINES says host_arch=x64 while -m32 is dropped
+          #     entirely (this workflow's immediately-preceding revision),
+          #     the compiler runs genuinely 64-bit, v8config.h's own
+          #     assertion above rejects target=arm outright — this was the
+          #     ERROR IN THIS MESSAGE ("Target architecture arm is only
+          #     supported on arm and ia32 host").
+          #   - The only self-consistent combination for target=arm is:
+          #     compiler actually runs -m32 (satisfies v8config.h) AND
+          #     GYP_DEFINES host_arch=ia32 (so v8.gyp picks
+          #     ia32/push_registers_asm.cc for the host toolset, matching
+          #     what the compiler can actually assemble).
+          #
+          # For target=arm64, host_arch=x64 with no -m32 is correct and
+          # unchanged from the previous revision of this workflow — v8config.h
+          # accepts x64 host for an arm64 target, and v8.gyp's
+          # host_arch=="x64" branch correctly supplies x64/push_registers_asm.cc
+          # for that case.
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
+            HOST_ARCH_GYP="ia32"
+          else
+            HOST_ARCH_GYP="x64"
+          fi
 
           # android_ndk_path is REQUIRED (node.gyp fails without it)
-          #
-          # host_arch/v8_host_arch=x64: defensive gyp hygiene, not a confirmed fix
-          # by itself. common.gypi keys its host -m64 cflag/ldflag on host_arch=="x64"
-          # explicitly (see common.gypi ~line 536), so pinning it removes ambiguity
-          # about what the host toolset resolves to. It does NOT appear to be the
-          # actual cause of the mksnapshot undefined-symbol error seen in this repo's
-          # CI run — that is a trap-handler.h source-selection issue, fixed by the
-          # patch step above (nodejs/node#36287). Kept here as harmless hardening.
-          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=x64 v8_host_arch=x64"
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=$HOST_ARCH_GYP v8_host_arch=$HOST_ARCH_GYP"
 
           # LAST-RESORT FALLBACK (only if trap-handler.h.patch above does not clear
           # the mksnapshot link error — e.g. the patch went stale for this Node
