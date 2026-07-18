@@ -13,6 +13,22 @@ Cross-compiled `libnode.so` + `node` CLI for Android ARM64 / ARM32 via GitHub Ac
 
 </div>
 
+## Progress
+
+| Task | Status | Details |
+|------|--------|---------|
+| `arm64-v8a` balanced build | ✅ | JIT + `-O3`, verified |
+| `arm64-v8a` speed build | ✅ | LTO enabled |
+| `arm64-v8a` size build | ✅ | V8 lite-mode |
+| `armeabi-v7a` balanced build | ⚠️ | Experimental — V8 cross-build bugs ([#58975](https://github.com/nodejs/node/issues/58975)) |
+| `armeabi-v7a` speed build | ⚠️ | Experimental |
+| `armeabi-v7a` size build | ⚠️ | Experimental |
+| CRTP forward-declare fix | ✅ | v24.x class structure compatible |
+| Host `-m64` override for arm32 | 🛠️ | `push_registers_asm.cc` x64 registers in `-m32` mode |
+| NDK r27d toolchain | ✅ | Clang 18, v24.x turboshaft unaffected |
+| CI artifacts + release attach | ✅ | Upload + GitHub Release on tags |
+| `CODE_OF_CONDUCT` | ✅ | Added to both branches |
+
 ## Builds
 
 | Profile | Flags | Use Case | Status |
