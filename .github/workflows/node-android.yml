@@ -499,7 +499,7 @@ jobs:
           if count == 0:
               print("::warning::could not find explicit-template Tuple<Word32,Word32> call in int64-lowering-reducer.h (maybe already fixed upstream)")
           else:
-              s = s.replace(old_tuple_call, 'return __ Tuple(result, __ Word32Constant(0));')
+              s = s.replace(old_tuple_call, 'return __ template Tuple<Word32, Word32>(result, __ Word32Constant(0));')
               reducer_h.write_text(s)
               print(f"patched deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h ({count} occurrence(s) of explicit-template Tuple call)")
 
