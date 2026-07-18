@@ -434,10 +434,26 @@ jobs:
           if assembler_h.exists():
               s = assembler_h.read_text()
 
-              # Clang 17 (r26d) handles CRTP correctly — no this-> qualification needed.
-              # The Clang 18+ CRTP regression (nodejs/node#60369) is avoided by using r26d.
-              # If upgrading to NDK r27+ in the future, re-add this-> to resolve, matcher_,
-              # ReduceIfReachable*, etc. in AssemblerOpInterface macros.
+              # CRTP fix for Clang two-phase name lookup in C++20 mode.
+              # AssemblerOpInterface<Next> : public Next uses names from the derived
+              # class (Next). Clang requires this-> qualification for these in C++20
+              # two-phase lookup in template base classes.
+              # The fix is needed because NDK r26d's Clang 17 in C++20 mode is strict
+              # about this, even though older Clang versions in C++17 mode were not.
+              # 
+              # 1. this->matcher_ in constructor initializer list and body
+              s = s.replace('  : matcher_', '  : this->matcher_')
+              s = s.replace(', matcher_', ', this->matcher_')
+              # 2. this->ReduceIfReachable in DECL_MULTI_REP_BINOP_V macro
+              s = s.replace('ReduceIfReachable##operation(', 'this->ReduceIfReachable##operation(')
+              # 3. this->ReduceIfReachable in other macros (DECL_MULTI_REP_BINOP, etc.)
+              # This covers TypeHint, GenericBinop, GenericUnop, ToNumberOrNumeric
+              s = s.replace('ReduceIfReachable(name, ', 'this->ReduceIfReachable(name, ')
+              # 4. this->resolve in macro bodies
+              s = s.replace('resolve(left, right,', 'this->resolve(left, right,')
+              s = s.replace('resolve(this->value(),', 'this->resolve(this->value(),')
+
+              print("patched assembler.h (CRTP dependent names: matcher_, ReduceIfReachable*, resolve)")
 
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro
               old_macro = (
