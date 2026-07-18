@@ -601,9 +601,34 @@ jobs:
           # to the host-side condition so the x64 source is only compiled for
           # the host during native x64 builds (not cross-compiles). The target-
           # side condition is unchanged and still matches native x64 builds.
-          patch('tools/v8_gypfiles/v8.gyp',
-                '_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"',
-                '_toolset == "host" and host_arch == "x64" and target_arch == "x64" or _toolset == "target" and target_arch=="x64"')
+          #
+          # IMPORTANT: this exact condition string appears TWICE in v8.gyp —
+          # once inside the OS=="win" block (guards push_registers_masm.asm)
+          # and once inside the OS!="win" block (guards push_registers_asm.cc,
+          # the one that actually breaks this build). Verified by count() on a
+          # fresh v24.x clone: 2 occurrences. The shared patch() helper above
+          # uses replace(old, new, count=1), which only touches the FIRST
+          # match — the Windows one — and silently leaves the non-Windows
+          # condition untouched, so the error keeps happening even though the
+          # step logs "patched tools/v8_gypfiles/v8.gyp" with no warning.
+          # Do NOT use the patch() helper here; replace every occurrence
+          # instead (both are safe to change identically — the added
+          # 'and target_arch == "x64"' is correct for the Windows/MASM
+          # branch too, since that branch has the same host-toolset
+          # cross-compile bug for the same reason).
+          v8_gyp_path = pathlib.Path('tools/v8_gypfiles/v8.gyp')
+          v8_gyp_old = '_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"'
+          v8_gyp_new = '_toolset == "host" and host_arch == "x64" and target_arch == "x64" or _toolset == "target" and target_arch=="x64"'
+          if not v8_gyp_path.exists():
+              print("::warning::file not found tools/v8_gypfiles/v8.gyp (skipping — may be version-specific)")
+          else:
+              v8_gyp_s = v8_gyp_path.read_text()
+              n_occurrences = v8_gyp_s.count(v8_gyp_old)
+              if n_occurrences == 0:
+                  print("::warning::context not found in tools/v8_gypfiles/v8.gyp (maybe already fixed upstream)")
+              else:
+                  v8_gyp_path.write_text(v8_gyp_s.replace(v8_gyp_old, v8_gyp_new))
+                  print(f"patched tools/v8_gypfiles/v8.gyp ({n_occurrences} occurrence(s) replaced — expected 2: one in the OS==win block, one in the OS!=win block)")
           PYEOF
 
           echo "Skipped from Termux's nodejs-lts patch set (reviewed, not applicable to a non-Termux NDK cross-build):"
