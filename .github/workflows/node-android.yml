@@ -719,7 +719,10 @@ jobs:
           # Build ONLY the 'node' target: produces both out/Release/node (CLI)
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
-          make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host=g++ AR.host=ar
+          # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc uses x64
+          # registers. Force -m64 on host compilers to override.
+          HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
+          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
