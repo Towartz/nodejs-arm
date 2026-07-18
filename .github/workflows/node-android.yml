@@ -449,11 +449,7 @@ jobs:
               s = s.replace('ReduceIfReachable', 'this->ReduceIfReachable')
               # 4. Forward-declare resolve so Clang finds it before line 5326
               s = s.replace('class AssemblerOpInterface : public Next {',
-                            'class AssemblerOpInterface : public Next {
-'
-                            '  template <typename Rep>
-'
-                            '  V<Rep> resolve(const V<Rep>& v);')
+                            "class AssemblerOpInterface : public Next {\n\n  template <typename Rep>\n\n  V<Rep> resolve(const V<Rep>& v);")
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
