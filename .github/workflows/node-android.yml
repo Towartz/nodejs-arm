@@ -1,6 +1,17 @@
 # .github/workflows/node-android.yml
 # Cross-compiles Node.js for Android: arm64-v8a (verified) + armeabi-v7a (experimental,
 # see nodejs/node#58975). Produces per ABI: lib<n>.so + node CLI binary.
+#
+# Downstream consumer: AuroraChat-Android (see AGENTS.MD). That project's
+# AuroraNodeBridgePlugin spawns the `node` binary as a raw subprocess
+# (ProcessBuilder), renamed to jniLibs/arm64-v8a/libaurora_node.so purely so
+# Android's APK installer extracts it with executable permissions — it is
+# NOT loaded via System.loadLibrary()/dlopen. This matters for packaging
+# (see the libc++_shared.so + $ORIGIN rpath step below): a raw-exec'd child
+# process does not automatically inherit the app's nativeLibraryDir search
+# path the way a dlopen'd library would, so every runtime dependency of
+# `node`/lib<n>.so must either be statically linked or discoverable via an
+# rpath baked into the binary itself.
 name: Node.js for Android (ARM)
 
 on:
@@ -898,8 +909,57 @@ jobs:
             patchelf --set-soname "$LIB" "$LIB"
             patchelf --replace-needed libnode.so "$LIB" node
           fi
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
-          ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+
+          # ---- Bundle libc++_shared.so + bake $ORIGIN rpath ----
+          # Downstream consumer (AuroraChat-Android / AGENTS.MD) spawns this
+          # binary as a raw subprocess via ProcessBuilder (AuroraNodeBridgePlugin),
+          # not via System.loadLibrary()/dlopen. Android only grants the
+          # app's nativeLibraryDir to the linker namespace automatically for
+          # the dlopen path; a manually exec'd child process does NOT inherit
+          # that search path unless the caller explicitly sets
+          # LD_LIBRARY_PATH, or the binary carries its own rpath. The
+          # -static-libstdc++ flag set in CXXFLAGS/LDFLAGS earlier in this
+          # workflow is the documented way to avoid this dependency entirely
+          # (developer.android.com/ndk/guides/cpp-support: "-static-libstdc++"
+          # is correct for libc++ despite the gcc-era name) — but whether it
+          # actually took effect depends on gyp's make-generator propagating
+          # LDFLAGS.target through to both the 'node' and 'lib.target' link
+          # steps, which is not guaranteed to hold across every Node ref/gyp
+          # version. Ship libc++_shared.so and set $ORIGIN unconditionally as
+          # a belt-and-braces fallback: harmless if static linking succeeded
+          # (rpath simply goes unused), and load-bearing if it didn't.
+          #
+          # Sysroot library directory naming does NOT always match the
+          # compiler-driver target triple: 32-bit ARM's compiler is prefixed
+          # armv7a-linux-androideabi<api>, but its sysroot/binutils libraries
+          # live under arm-linux-androideabi (no "v7a", no API suffix) —
+          # confirmed against developer.android.com/ndk/guides/other_build_systems.
+          # aarch64/x86_64 targets have no such split (driver prefix ==
+          # sysroot triple), so only the 32-bit leg needs remapping.
+          case "${{ matrix.dest_cpu }}" in
+            arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
+            *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
+          esac
+          cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
+
+          # $ORIGIN resolves relative to whichever directory node/$LIB
+          # actually end up in at runtime (jniLibs' flattened nativeLibraryDir
+          # on-device, or the current directory in a manual Termux test) —
+          # correct for both the dlopen and raw-exec consumption models.
+          patchelf --set-rpath '$ORIGIN' node
+          patchelf --set-rpath '$ORIGIN' "$LIB"
+
+          # Sanity check: surface any *other* unexpected external dependency
+          # here in CI rather than discovering it later on a real device.
+          # libc/libm/libdl/liblog are always provided by the Android
+          # platform itself and are expected; everything else listed below
+          # should already be either statically linked or bundled in this
+          # tar.gz (libc++_shared.so, and $LIB itself).
+          echo "---- Remaining NEEDED entries (expect only platform libs + $LIB + libc++_shared.so) ----"
+          "$TC/bin/llvm-readelf" -d node "$LIB" | grep NEEDED
+
+          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
+          ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
 
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
@@ -910,9 +970,106 @@ jobs:
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
           retention-days: 14
 
-      # ---------- 6b. Attach to GitHub Release (tag pushes only) ----------
-      - name: Attach to GitHub Release
-        if: success() && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3  # v2 -> v3 verified current 2026-07-18; `files:` input unchanged
+      # Release creation moved out of this matrix job entirely — see the
+      # `release` job below. Reasons: (1) this job runs once per ABI in
+      # parallel, so two matrix legs both calling action-gh-release against
+      # the *same* tag at the *same* time is a real create-vs-update race
+      # (softprops/action-gh-release fetches-then-creates-if-missing; two
+      # concurrent first-attaches can both see "missing" and both try to
+      # create); (2) the old `if: startsWith(github.ref, 'refs/tags/')`
+      # condition is why "Attach to GitHub Release" shows as skipped for
+      # any workflow_dispatch/branch-push run — this workflow's own trigger
+      # list includes workflow_dispatch and a plain branch push, neither of
+      # which is a tag push, so most runs never created a release at all.
+
+  # ---------- Release ----------
+  # Single job, runs once after all matrix legs finish (armeabi-v7a's
+  # continue-on-error keeps this from being blocked by that experimental
+  # leg failing — see `build.strategy.matrix` above). Downloads whatever
+  # per-ABI artifacts got uploaded and attaches all of them to one release,
+  # auto-naming/auto-tagging when the run wasn't itself a tag push so every
+  # workflow_dispatch/branch-push build still gets a release without manual
+  # tagging, and using GitHub's own commit-based changelog generation
+  # (generate_release_notes) for the notes.
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: success()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # Re-derive NODE_REF/LIB_NAME here rather than plumbing them out of
+      # the matrix `build` job: GITHUB_ENV set inside a job's steps is not
+      # visible to other jobs, and matrix job `outputs:` only reliably
+      # expose whichever matrix leg's write happens to finish last — for
+      # values that are identical across every leg (as these are; they come
+      # from workflow_dispatch inputs shared by the whole matrix, not from
+      # anything ABI-specific), redoing this ~10-line normalization here is
+      # simpler and unambiguous than relying on that ordering behavior.
+      - name: Resolve inputs
+        env:
+          NODE_VERSION_CHOICE: ${{ inputs.node_version || 'v24.x' }}
+          CUSTOM_REF_RAW: ${{ inputs.custom_ref }}
+          LIB_NAME_RAW: ${{ inputs.lib_name || 'node' }}
+        run: |
+          REQ="$NODE_VERSION_CHOICE"
+          if [ "$REQ" = "custom" ]; then REQ="$CUSTOM_REF_RAW"; fi
+          test -n "$REQ" || REQ="v24.x"
+          echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
+
+          NAME="$LIB_NAME_RAW"
+          NAME="${NAME#lib}"; NAME="${NAME%.so}"
+          echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
+
+          # Tag: reuse the pushed tag verbatim when this run WAS a tag push
+          # (respects a manually-chosen version tag like v24.18.1-android);
+          # otherwise synthesize one from build metadata + run_number so
+          # workflow_dispatch/branch-push runs are still unique and
+          # traceable back to the run that produced them, with no manual
+          # tagging step required.
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            SAFE_REF="$(echo "$REQ" | tr -c 'A-Za-z0-9_.-' '-')"
+            echo "RELEASE_TAG=${NAME}-android-${SAFE_REF}-run${{ github.run_number }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download all ABI artifacts
+        uses: actions/download-artifact@v6  # verified current 2026-07-19 (v5->v6 comparing against actions/download-artifact releases)
         with:
-          files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          pattern: ${{ env.LIB_NAME }}-android-*
+          path: dist
+          merge-multiple: true
+          if-no-artifact-found: warn  # armeabi-v7a is experimental — its artifact may legitimately be absent
+
+      - name: List downloaded artifacts
+        run: ls -lh dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
+
+      - name: Create/Update GitHub Release
+        uses: softprops/action-gh-release@v3  # v2 -> v3 verified current 2026-07-18; tag_name/name/body/files/generate_release_notes/make_latest/prerelease unchanged
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "${{ env.LIB_NAME }} — Node ${{ env.NODE_REF }} for Android (build #${{ github.run_number }})"
+          # GitHub's own commit-based auto changelog (compares against the
+          # previous release's tag). softprops/action-gh-release prepends
+          # the custom `body` below to these generated notes rather than
+          # replacing them.
+          generate_release_notes: true
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          body: |
+            **Automated Android build**
+
+            | | |
+            |---|---|
+            | Node.js ref | `${{ env.NODE_REF }}` |
+            | Library name | `lib${{ env.LIB_NAME }}.so` |
+            | Build profile | `${{ inputs.profile || 'balanced' }}` |
+            | NDK version | `${{ env.NDK_VERSION }}` |
+            | Trigger | `${{ github.event_name }}` |
+            | Commit | `${{ github.sha }}` |
+
+            arm64-v8a is always included when the build succeeds; armeabi-v7a
+            is experimental and only present below if that leg also succeeded.
+          files: dist/*
