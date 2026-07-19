@@ -1072,6 +1072,39 @@ jobs:
             ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
           fi
 
+      # ---------- 5b. Package Node.js headers (native addon builds) ----------
+      # Setiap ABI dapat zip header sendiri, TIDAK digabung jadi satu.
+      # Alasan: config.gypi dihasilkan ./configure per-leg dan isinya beda
+      # per ABI (target_arch, byteorder, dll). Kalau header arm64-v8a dipakai
+      # untuk compile native addon melawan runtime armeabi-v7a (atau
+      # sebaliknya), config.gypi-nya salah dan build addon-nya bisa gagal
+      # atau ABI mismatch di device.
+      #
+      # Layout include/node/*.h mengikuti struktur node-vX.Y.Z-headers.tar.gz
+      # resmi dari nodejs.org — ini yang dibaca node-gyp/node-addon-api lewat
+      # `npm config set nodedir=...` untuk compile native module.
+      - name: Package Node.js headers (${{ matrix.abi }})
+        if: success()
+        working-directory: node
+        run: |
+          HDR_DIR="node-headers/include/node"
+          mkdir -p "$HDR_DIR"
+
+          cp common.gypi "$HDR_DIR/"
+          cp config.gypi "$HDR_DIR/"
+          cp src/*.h "$HDR_DIR/"
+          cp -r deps/v8/include/. "$HDR_DIR/"
+          cp -r deps/uv/include/. "$HDR_DIR/"
+
+          echo "---- Isi header per ABI (${{ matrix.abi }}) ----"
+          find "$HDR_DIR" -maxdepth 1 -name "*.h" | wc -l
+          grep -E "target_arch|byteorder" "$HDR_DIR/config.gypi"
+
+          cd node-headers
+          zip -rq "../../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip" include
+          cd ..
+          ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
+
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
         if: success()
@@ -1079,6 +1112,17 @@ jobs:
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          retention-days: 14
+
+      # ---------- 6b. Upload headers artifact ----------
+      # Nama artifact dikasih suffix -headers supaya beda dari artifact binary
+      # di atas. Job release nanti download dua-duanya lewat pattern terpisah.
+      - name: Upload headers artifact
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
+          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers.zip
           retention-days: 14
 
       # Release creation moved out of this matrix job entirely — see the
@@ -1181,4 +1225,9 @@ jobs:
 
             arm64-v8a is always included when the build succeeds; armeabi-v7a
             is experimental and only present below if that leg also succeeded.
+
+            Each ABI also ships a `*-headers.zip` (Node.js includes +
+            `config.gypi`) for compiling native N-API addons against that
+            specific build. Use the headers matching the target ABI —
+            `config.gypi` differs between arm64-v8a and armeabi-v7a.
           files: dist/*
