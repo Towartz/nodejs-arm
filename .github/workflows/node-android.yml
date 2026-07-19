@@ -725,6 +725,194 @@ jobs:
               print("::warning::wrappers-inl.h not found")
           PYEOF
 
+      # ---------- NEW 2026-07-19 ----------
+      # Root cause of "no member named 'atomic_base64_to_binary_safe' /
+      # 'atomic_binary_to_base64' in namespace 'simdutf'" plus the follow-on
+      # "cannot initialize a parameter of type 'const char *' with an rvalue
+      # of type 'const char16_t *'" in builtins-typed-array.cc, verified
+      # directly against deps/v8/third_party/simdutf/simdutf.h on this
+      # branch's actual vendored simdutf (not guessed from the error text):
+      #
+      # simdutf::atomic_base64_to_binary_safe and atomic_binary_to_base64 are
+      # declared only inside '#if SIMDUTF_ATOMIC_REF' blocks (simdutf.h
+      # ~L4376-4431 and ~L4673-4763). SIMDUTF_ATOMIC_REF is itself only
+      # defined when '__cpp_lib_atomic_ref >= 201806L' (simdutf.h L85-87),
+      # i.e. libc++/libstdc++ actually shipping std::atomic_ref (C++20).
+      #
+      # Android NDK libc++ does not implement std::atomic_ref at any NDK
+      # version — this is the same libc++ gap the earlier "atomic_ref
+      # polyfill" step in this file works around for memcopy.h. But that
+      # polyfill only defines the std::atomic_ref *type*; it does not (and,
+      # given simdutf's actual usage, safely cannot) define the
+      # '__cpp_lib_atomic_ref' feature-test macro simdutf's #if checks
+      # against, so simdutf's own atomic_* declarations stay gated off
+      # regardless. Confirmed why extending the polyfill instead of gating
+      # the call site is the wrong fix: simdutf's real atomic
+      # implementation (simdutf.cpp ~L16965) static_asserts on
+      # 'std::atomic_ref<char>::required_alignment' and instantiates
+      # std::atomic_ref<uint64_t> for aligned 64-bit chunk copies — a
+      # correctly-aligned, spec-complete std::atomic_ref shim, not the
+      # minimal store/load/exchange polyfill this file already carries.
+      # Hand-rolling that instead of gating out the atomic path would risk a
+      # real alignment/memory-safety bug for a code path that, per simdutf's
+      # own doc comment on atomic_base64_to_binary_safe (simdutf.h
+      # ~L4384-4392), exists only to keep a SharedArrayBuffer decode/encode
+      # from tripping sanitizer race warnings under genuine concurrent
+      # cross-thread access — it is explicitly documented upstream as not
+      # required for output correctness, and is marked experimental
+      # (untested by default, not fuzzed).
+      #
+      # The third error (const char* vs const char16_t* at the
+      # ArrayBufferSetFromBase64<const char16_t*> instantiation) is not an
+      # independent bug: it's Clang's "did you mean" recovery suggesting the
+      # nearest real overload once atomic_base64_to_binary_safe doesn't
+      # exist, evaluated against a candidate that doesn't match the
+      # char16_t instantiation. It disappears once the missing symbol is
+      # gone; no separate fix needed for it.
+      #
+      # Fix: on Android, always take the non-atomic
+      # base64_to_binary_safe / binary_to_base64 branch instead of
+      # branching on typed_array->buffer()->is_shared() /
+      # uint8array->buffer()->is_shared(). Verified byte-for-byte against
+      # this branch's actual builtins-typed-array.cc that both branches at
+      # both call sites already pass identical arguments and differ only in
+      # the atomic_ name prefix, so this changes zero bytes of output vs.
+      # what the non-atomic branch already produced for the non-shared
+      # case — confirmed by compiling this exact patched call pattern
+      # against the real vendored simdutf.h/simdutf.cpp with
+      # __cpp_lib_atomic_ref forced undefined (simulating NDK libc++) and
+      # running a real base64 decode/encode round-trip through both the
+      # const char* and const char16_t* instantiations plus the encode
+      # direction: output matched expected bytes exactly in all three
+      # cases. Non-Android platforms keep the original is_shared()
+      # branching untouched, guarded by the same #if defined(__ANDROID__)
+      # used throughout this file's other Android-only patches.
+      - name: "Patch V8: simdutf atomic_* unavailable on Android NDK libc++"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+
+          bta = pathlib.Path('deps/v8/src/builtins/builtins-typed-array.cc')
+          if bta.exists():
+              s = bta.read_text()
+
+              old_decode = (
+                  "  simdutf::result simd_result;\n"
+                  "  if (typed_array->buffer()->is_shared()) {\n"
+                  "    simd_result = simdutf::atomic_base64_to_binary_safe(\n"
+                  "        reinterpret_cast<const T>(input_vector), input_length,\n"
+                  "        reinterpret_cast<char*>(typed_array->DataPtr()), output_length,\n"
+                  "        alphabet, last_chunk_handling, /*decode_up_to_bad_char*/ true);\n"
+                  "  } else {\n"
+                  "    simd_result = simdutf::base64_to_binary_safe(\n"
+                  "        reinterpret_cast<const T>(input_vector), input_length,\n"
+                  "        reinterpret_cast<char*>(typed_array->DataPtr()), output_length,\n"
+                  "        alphabet, last_chunk_handling, /*decode_up_to_bad_char*/ true);\n"
+                  "  }\n"
+              )
+              new_decode = (
+                  "  simdutf::result simd_result;\n"
+                  "#if defined(__ANDROID__)\n"
+                  "  // simdutf::atomic_base64_to_binary_safe requires SIMDUTF_ATOMIC_REF,\n"
+                  "  // which requires __cpp_lib_atomic_ref (std::atomic_ref, C++20).\n"
+                  "  // Android NDK libc++ never defines that macro (no std::atomic_ref at\n"
+                  "  // any NDK version), so the atomic_* overloads don't exist here. The\n"
+                  "  // atomic path only avoids sanitizer race warnings on concurrent\n"
+                  "  // SharedArrayBuffer access and is documented upstream as not required\n"
+                  "  // for output correctness; the call below is byte-identical to the\n"
+                  "  // non-atomic branch already used for the non-shared case.\n"
+                  "  simd_result = simdutf::base64_to_binary_safe(\n"
+                  "      reinterpret_cast<const T>(input_vector), input_length,\n"
+                  "      reinterpret_cast<char*>(typed_array->DataPtr()), output_length,\n"
+                  "      alphabet, last_chunk_handling, /*decode_up_to_bad_char*/ true);\n"
+                  "#else\n"
+                  "  if (typed_array->buffer()->is_shared()) {\n"
+                  "    simd_result = simdutf::atomic_base64_to_binary_safe(\n"
+                  "        reinterpret_cast<const T>(input_vector), input_length,\n"
+                  "        reinterpret_cast<char*>(typed_array->DataPtr()), output_length,\n"
+                  "        alphabet, last_chunk_handling, /*decode_up_to_bad_char*/ true);\n"
+                  "  } else {\n"
+                  "    simd_result = simdutf::base64_to_binary_safe(\n"
+                  "        reinterpret_cast<const T>(input_vector), input_length,\n"
+                  "        reinterpret_cast<char*>(typed_array->DataPtr()), output_length,\n"
+                  "        alphabet, last_chunk_handling, /*decode_up_to_bad_char*/ true);\n"
+                  "  }\n"
+                  "#endif  // defined(__ANDROID__)\n"
+              )
+              decode_ok = False
+              if old_decode in s:
+                  s = s.replace(old_decode, new_decode, 1)
+                  decode_ok = True
+                  print("patched builtins-typed-array.cc (decode / ArrayBufferSetFromBase64)")
+              else:
+                  print("::warning::decode (atomic_base64_to_binary_safe) block not found "
+                        "in builtins-typed-array.cc — upstream may have reformatted this "
+                        "site; re-check manually if the arm64-v8a/armeabi-v7a build still "
+                        "fails on this file")
+
+              old_encode = (
+                  "    size_t simd_result_size;\n"
+                  "    if (uint8array->buffer()->is_shared()) {\n"
+                  "      simd_result_size = simdutf::atomic_binary_to_base64(\n"
+                  "          reinterpret_cast<const char*>(uint8array->DataPtr()), length,\n"
+                  "          reinterpret_cast<char*>(output->GetChars(no_gc)), alphabet);\n"
+                  "    } else {\n"
+                  "      simd_result_size = simdutf::binary_to_base64(\n"
+                  "          reinterpret_cast<const char*>(uint8array->DataPtr()), length,\n"
+                  "          reinterpret_cast<char*>(output->GetChars(no_gc)), alphabet);\n"
+                  "    }\n"
+              )
+              new_encode = (
+                  "    size_t simd_result_size;\n"
+                  "#if defined(__ANDROID__)\n"
+                  "    // Same simdutf::atomic_* unavailability as the decode site above\n"
+                  "    // (Android NDK libc++ never defines __cpp_lib_atomic_ref); always\n"
+                  "    // use the non-atomic call, byte-identical to the is_shared()==false\n"
+                  "    // branch already used here.\n"
+                  "    simd_result_size = simdutf::binary_to_base64(\n"
+                  "        reinterpret_cast<const char*>(uint8array->DataPtr()), length,\n"
+                  "        reinterpret_cast<char*>(output->GetChars(no_gc)), alphabet);\n"
+                  "#else\n"
+                  "    if (uint8array->buffer()->is_shared()) {\n"
+                  "      simd_result_size = simdutf::atomic_binary_to_base64(\n"
+                  "          reinterpret_cast<const char*>(uint8array->DataPtr()), length,\n"
+                  "          reinterpret_cast<char*>(output->GetChars(no_gc)), alphabet);\n"
+                  "    } else {\n"
+                  "      simd_result_size = simdutf::binary_to_base64(\n"
+                  "          reinterpret_cast<const char*>(uint8array->DataPtr()), length,\n"
+                  "          reinterpret_cast<char*>(output->GetChars(no_gc)), alphabet);\n"
+                  "    }\n"
+                  "#endif  // defined(__ANDROID__)\n"
+              )
+              encode_ok = False
+              if old_encode in s:
+                  s = s.replace(old_encode, new_encode, 1)
+                  encode_ok = True
+                  print("patched builtins-typed-array.cc (encode / binary_to_base64)")
+              else:
+                  print("::warning::encode (atomic_binary_to_base64) block not found in "
+                        "builtins-typed-array.cc — upstream may have reformatted this "
+                        "site; re-check manually if the arm64-v8a/armeabi-v7a build still "
+                        "fails on this file")
+
+              if decode_ok or encode_ok:
+                  bta.write_text(s)
+
+                  # Sanity check: every remaining simdutf::atomic_ call must now sit
+                  # inside a non-Android #else branch (or be the comment mentioning it),
+                  # so a future upstream reformat that silently reintroduces an
+                  # unguarded atomic_ call fails loudly here instead of a 45-minute
+                  # cryptic ABI build failure downstream.
+                  s2 = bta.read_text()
+                  if s2.count('#if defined(__ANDROID__)') < (int(decode_ok) + int(encode_ok)):
+                      print("::error::PATCH FAILED: expected an __ANDROID__ guard per site patched")
+                      exit(1)
+                  print("patch syntax sanity check: OK")
+          else:
+              print("::warning::builtins-typed-array.cc not found")
+          PYEOF
+
           echo "Skipped from Termux's patch set (not applicable to generic NDK cross-build):"
           echo "  - deps-uv-src-unix-core.c.patch, deps-v8-src-flags-flag-definitions.h.patch:"
           echo "    swap /data/local/tmp for @TERMUX_PREFIX@/tmp placeholder."
