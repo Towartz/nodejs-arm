@@ -1101,7 +1101,6 @@ jobs:
   # auto-naming/auto-tagging when the run wasn't itself a tag push so every
   # workflow_dispatch/branch-push build still gets a release without manual
   # tagging, and using GitHub's own commit-based changelog generation
-  # (generate_release_notes) for the notes.
   release:
     name: Create GitHub Release
     needs: build
@@ -1166,7 +1165,6 @@ jobs:
           # previous release's tag). softprops/action-gh-release prepends
           # the custom `body` below to these generated notes rather than
           # replacing them.
-          generate_release_notes: true
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           body: |
