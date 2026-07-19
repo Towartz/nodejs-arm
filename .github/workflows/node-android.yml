@@ -665,6 +665,9 @@ jobs:
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
           export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          # Static-link libc++ -> 1 file output, no libc++_shared.so needed
+          export CXXFLAGS="$CXXFLAGS -static-libstdc++"
+          export LDFLAGS="$LDFLAGS -static-libstdc++"
           export AR="$TC/bin/llvm-ar"
           export NM="$TC/bin/llvm-nm"
           export RANLIB="$TC/bin/llvm-ranlib"
