@@ -611,14 +611,17 @@ jobs:
           # libv8_base_without_compiler.a for the host toolset — which is
           # exactly the "undefined symbol: PushAllRegistersAndIterateStack"
           # mksnapshot linker error. Do not patch this file. Instead, make
-          # sure GYP_DEFINES' host_arch and the host compiler's actual
-          # -m32/-m64 mode agree with each other for whichever leg is
-          # building — see the host_arch/CFLAGS_host block in the
-          # cross-compile step below for the full explanation (both errors
-          # in this thread — the "bad register name" one and the
-          # "undefined symbol: PushAllRegistersAndIterateStack" one — trace
-          # back to that same host_arch/compiler-mode mismatch, just in
-          # opposite directions).
+          # sure CC_host actually runs in the same -m32/-m64 mode that
+          # dest_cpu requires for whichever leg is building (GYP_DEFINES'
+          # host_arch does NOT drive this selection — configure.py
+          # auto-detects host_arch from CC_host's own compiler macros and
+          # bakes that into config.gypi, which then overrides whatever
+          # host_arch you set in GYP_DEFINES; see the CC_host block in the
+          # cross-compile step below for the full, source-verified
+          # explanation). Both errors in this thread — the "bad register
+          # name" one and the "undefined symbol:
+          # PushAllRegistersAndIterateStack" one — trace back to that same
+          # CC_host/compiler-mode mismatch, just in opposite directions.
           # ============================================================
           PYEOF
 
@@ -672,13 +675,26 @@ jobs:
           # CRITICAL: host build tools must use the host compiler.
           # Without this, configure probes the ARM clang and thinks host_arch=arm,
           # and host tools (torque/mksnapshot) get built with the Android toolchain.
-          export CC_host="ccache gcc"
-          export CXX_host="ccache g++"
+          #
+          # CORRECTED (verified directly against this repo's v24.18.1 checkout,
+          # configure.py + tools/gyp/pylib/gyp/input.py — see below): CC_host must
+          # carry -m32 itself for the armeabi-v7a leg, not just CFLAGS_host. An
+          # earlier revision of this workflow set CC_host="ccache gcc" here (no
+          # -m32) and relied on GYP_DEFINES' host_arch=ia32 to tell gyp which
+          # push_registers_asm.cc to pick. That does not work — see the corrected
+          # explanation below the dest_cpu branch.
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            export CC_host="ccache gcc -m32"
+            export CXX_host="ccache g++ -m32"
+          else
+            export CC_host="ccache gcc"
+            export CXX_host="ccache g++"
+          fi
 
           # ============================================================
           # host_arch must match dest_cpu's requirement, per V8's own
           # compile-time assertions in deps/v8/include/v8config.h (lines
-          # ~962-990). Verified directly against this repo's v24.9.0
+          # ~962-990). Verified directly against this repo's v24.18.1
           # checkout:
           #
           #   target arm64 : host must be x64 or arm64   (V8_HOST_ARCH_X64 || V8_HOST_ARCH_ARM64)
@@ -698,33 +714,52 @@ jobs:
           # ia32 host" at the preprocessor stage — this is exactly the
           # error seen when -m32 was removed from CFLAGS_host for this leg.
           #
-          # This means GYP_DEFINES' host_arch must track the SAME choice,
-          # or gyp and the compiler disagree about what "host" is:
-          #   - If GYP_DEFINES says host_arch=x64 while the compiler runs
-          #     -m32, gyp picks deps/v8/src/heap/base/asm/x64/push_registers_asm.cc
-          #     for the host toolset (v8.gyp's host_arch=="x64" branch —
-          #     see tools/v8_gypfiles/v8.gyp ~line 1980), but that file is
-          #     raw 64-bit-register inline asm with no #ifdef guard of its
-          #     own, so a -m32 compiler chokes on it with "bad register
-          #     name `%rbp'" and similar — this was the FIRST error in this
-          #     thread.
-          #   - If GYP_DEFINES says host_arch=x64 while -m32 is dropped
-          #     entirely (this workflow's immediately-preceding revision),
-          #     the compiler runs genuinely 64-bit, v8config.h's own
-          #     assertion above rejects target=arm outright — this was the
-          #     ERROR IN THIS MESSAGE ("Target architecture arm is only
-          #     supported on arm and ia32 host").
-          #   - The only self-consistent combination for target=arm is:
-          #     compiler actually runs -m32 (satisfies v8config.h) AND
-          #     GYP_DEFINES host_arch=ia32 (so v8.gyp picks
-          #     ia32/push_registers_asm.cc for the host toolset, matching
-          #     what the compiler can actually assemble).
+          # CORRECTED — GYP_DEFINES' host_arch does NOT control which
+          # push_registers_asm.cc gyp picks. Traced the actual mechanism by
+          # reading Node v24.18.1's own configure.py + gyp source directly:
           #
-          # For target=arm64, host_arch=x64 with no -m32 is correct and
-          # unchanged from the previous revision of this workflow — v8config.h
-          # accepts x64 host for an arm64 target, and v8.gyp's
-          # host_arch=="x64" branch correctly supplies x64/push_registers_asm.cc
-          # for that case.
+          #   1. configure.py's host_arch_cc() (configure.py ~line 1493)
+          #      auto-detects host_arch by running `<CC_host> -dM -E -` and
+          #      checking for __i386__ vs __x86_64__ in the output
+          #      (configure.py ~line 1498, ~line 1516). It does NOT read
+          #      GYP_DEFINES for this — CC_host's actual macros are the only
+          #      input.
+          #   2. That detected value is written into config.gypi as
+          #      variables.host_arch (configure.py ~line 1651,
+          #      o['variables']['host_arch'] = host_arch).
+          #   3. gyp loads GYP_DEFINES first as "default" variables (gyp's
+          #      own comment at tools/gyp/pylib/gyp/__init__.py ~line 603:
+          #      "-D isn't just for define, it's for default"), then loads
+          #      config.gypi as an -I include. In
+          #      ProcessVariablesAndConditionsInDict
+          #      (tools/gyp/pylib/gyp/input.py ~line 1296-1305), every key in
+          #      config.gypi's own "variables" dict OVERWRITES the matching
+          #      key already set from GYP_DEFINES.
+          #   4. Net effect: config.gypi's auto-detected host_arch always
+          #      wins over whatever host_arch=... you put in GYP_DEFINES.
+          #      Setting host_arch=ia32 in GYP_DEFINES (previous revision of
+          #      this workflow) was silently ignored — v8.gyp's per-arch
+          #      'sources' conditions (tools/v8_gypfiles/v8.gyp ~line
+          #      2072-2091) still matched host_arch=="x64" because that is
+          #      what config.gypi actually contained, since CC_host had no
+          #      -m32 and so was detected as x64.
+          #
+          # Reproduced this exact chain in a sandbox using configure.py's own
+          # host_arch_cc()/cc_macros() logic: CC_host="gcc" -> host_arch_cc()
+          # returns "x64"; CC_host="gcc -m32" -> returns "ia32". So the only
+          # correct fix is making CC_host/CXX_host actually run -m32
+          # themselves (done above), which makes configure.py's own
+          # auto-detection produce host_arch=ia32 in config.gypi in the first
+          # place — nothing left for GYP_DEFINES to override. GYP_DEFINES'
+          # host_arch/v8_host_arch below is kept in sync anyway (harmless,
+          # and covers any V8-side condition that does read GYP_DEFINES
+          # directly rather than through config.gypi).
+          #
+          # For target=arm64, host_arch=x64 (CC_host with no -m32) is correct
+          # and unchanged — v8config.h accepts x64 host for an arm64 target,
+          # and v8.gyp's host_arch=="x64" branch correctly supplies
+          # x64/push_registers_asm.cc for that case; config.gypi's
+          # auto-detection already produces x64 here with no override needed.
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
             export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
             HOST_ARCH_GYP="ia32"
@@ -774,10 +809,38 @@ jobs:
           # Build ONLY the 'node' target: produces both out/Release/node (CLI)
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
-          # No -m32/-m64 override needed here anymore: host tools are never forced
-          # to a non-native bitness (see the corrected note above the ./configure
-          # call), so there is nothing to counteract on the host compiler flags.
-          make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
+          #
+          # CORRECTED: CC.host/CXX.host here MUST carry -m32 for the armeabi-v7a
+          # leg, matching CC_host/CXX_host set before ./configure above. Verified
+          # directly (tools/gyp/pylib/gyp/generator/make.py ~line 2482):
+          # `./configure` bakes CC_host's value into the generated Makefile as
+          # `CC.host ?= <value>` at generate time (GetEnvironFallback reads
+          # CC_host once, when gyp runs). But a `make CC.host=...` command-line
+          # argument always overrides a Makefile's own `?=` default — confirmed
+          # with a standalone GNU Make test in this sandbox: a bare
+          # `CC.host ?= ccache gcc -m32` in the Makefile becomes "ccache gcc -m32"
+          # when make runs with no override, but becomes "ccache gcc" (the -m32
+          # silently lost) the moment `make ... CC.host="ccache gcc"` is passed
+          # on the command line, regardless of what ./configure baked in.
+          # So leaving this make invocation unconditionally at CC.host="ccache
+          # gcc" (no -m32) would re-introduce a host_arch/compiler-mode mismatch
+          # at the actual compile step even after CC_host is fixed above:
+          # config.gypi would correctly say host_arch=ia32 (picking
+          # ia32/push_registers_asm.cc, which contains 32-bit-only opcodes like
+          # `push %ebp`), but the compiler actually invoked at this step would
+          # be running 64-bit again — verified directly in this sandbox that
+          # compiling ia32/push_registers_asm.cc's asm with a 64-bit g++ (no
+          # -m32) fails with "Error: operand size mismatch for `push'" on every
+          # push/mov line, i.e. the mirror-image failure of the original "bad
+          # register name" error, just from the opposite direction. Branching
+          # this make invocation on dest_cpu keeps CC.host/CXX.host's bitness
+          # consistent with CC_host/CXX_host end to end, matching what
+          # config.gypi and v8.gyp's source-selection actually resolved to.
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            make -j"$(nproc)" node CC.host="ccache gcc -m32" CXX.host="ccache g++ -m32" LINK.host="g++ -m32" AR.host=ar
+          else
+            make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
+          fi
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
