@@ -958,8 +958,32 @@ jobs:
           echo "---- Remaining NEEDED entries (expect only platform libs + $LIB + libc++_shared.so) ----"
           "$TC/bin/llvm-readelf" -d node "$LIB" | grep NEEDED
 
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
-          ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          # ---- Enforce single-lib goal: only bundle libc++_shared.so if it's
+          # ---- actually still load-bearing. -static-libstdc++ (set in
+          # ---- CXXFLAGS/LDFLAGS above) is supposed to make both 'node' and
+          # ---- $LIB fully static w.r.t. libc++, but whether it actually took
+          # ---- effect depends on gyp propagating LDFLAGS.target through both
+          # ---- link steps, which isn't guaranteed across every Node ref/gyp
+          # ---- version (see comment above the cp of libc++_shared.so). This
+          # ---- was previously an echo-only check — a silent regression here
+          # ---- would just mean libc++_shared.so quietly stays load-bearing
+          # ---- forever with no signal. Now it's asserted: if NEEDED is clean,
+          # ---- drop libc++_shared.so from the tar.gz entirely.
+          if "$TC/bin/llvm-readelf" -d node "$LIB" | grep -q 'NEEDED.*libc++_shared'; then
+            echo "::warning::libc++_shared.so is still a real runtime dependency — -static-libstdc++ did not fully take effect this build. Keeping it bundled."
+            BUNDLE_LIBCXX=1
+          else
+            echo "libc++ is fully static in both node and $LIB — libc++_shared.so is no longer needed."
+            BUNDLE_LIBCXX=0
+          fi
+
+          if [ "$BUNDLE_LIBCXX" = "1" ]; then
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
+            ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          else
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
+            ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          fi
 
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
