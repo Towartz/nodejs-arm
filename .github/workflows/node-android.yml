@@ -38,14 +38,25 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # r27c fails on v26.x turboshaft CRTP; r26d (Clang 17) is the last working
-  # deps/v8/src/compiler/turboshaft/assembler.h on this Node branch (CRTP
-  # name-resolution regression in AssemblerOpInterface — surfaces as "expected
-  # '}'" in pipeline.cc plus cascading undeclared-identifier errors for
-  # resolve/ReduceIfReachable*/matcher_). r27c's older Clang doesn't hit it.
-  # Confirmed working via nttld/setup-ndk below. If a future Node/V8 release
-  # patches turboshaft for Clang 21+, r29 becomes an option again.
-  NDK_VERSION: 'r26d'
+  # UPDATED 2026-07-20: r26d dropped after a reproducible clang-17 segfault
+  # (SIGSEGV, exit 139) while parsing deps/v8/src/json/json-stringifier.cc —
+  # inside FastJsonStringifier::SerializeObjectKey's switch/case body. This is
+  # a compiler crash, not a source-level diagnostic (a clang stack trace
+  # ending in "clang frontend command failed with exit code 139", no "error:"
+  # pointing at our code), and it reproduced identically on both arm64-v8a
+  # and armeabi-v7a. r26d's bundled Clang 17 is the known-bad compiler here.
+  #
+  # r27d (Clang 18 per NDK release notes) is a different Clang major than
+  # both r26d (17) and the earlier-rejected r27c. r27c was dropped for an
+  # unrelated CRTP name-resolution regression in
+  # deps/v8/src/compiler/turboshaft/assembler.h (AssemblerOpInterface),
+  # surfacing as a clean "error: expected '}'" in pipeline.cc — no stack
+  # trace, no segfault. r27d has not been separately confirmed against that
+  # exact CRTP path on this Node branch; if it resurfaces it will look
+  # like that clean compile error, clearly distinguishable from the
+  # json-stringifier segfault this change fixes. Track both failure modes
+  # separately if either comes back.
+  NDK_VERSION: 'r27d'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -94,29 +105,24 @@ jobs:
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
-      # ---------- 1. Android NDK (r26d) ----------
-      # NDK r27+ ships Clang 18+, which has a CRTP regression in V8's turboshaft
-      # AssemblerOpInterface on Node.js v26.x. r26d (Clang 17) is the last working
-      # version. We download it manually because nttld/setup-ndk doesn't override
-      # the system-preinstalled NDK on GitHub Actions runners.
-      - name: Install NDK ${{ env.NDK_VERSION }}
-        run: |
-          NDK_ZIP="android-ndk-${{ env.NDK_VERSION }}-linux.zip"
-          NDK_URL="https://dl.google.com/android/repository/$NDK_ZIP"
-          echo "Downloading NDK ${{ env.NDK_VERSION }} from $NDK_URL ..."
-          curl -fsSL -o "$NDK_ZIP" "$NDK_URL"
-          unzip -q "$NDK_ZIP"
-          rm "$NDK_ZIP"
-          NDK_DIR="${{ github.workspace }}/android-ndk-${{ env.NDK_VERSION }}"
-          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK=$NDK_DIR" >> "$GITHUB_ENV"
-          echo "NDK installed at $NDK_DIR"
+      # ---------- 1. Android NDK (r27d) ----------
+      # Switched from a manual curl+unzip to nttld/setup-ndk to match the
+      # v24-only workflow this was diffed against. The manual download step
+      # this replaces existed only because r26d was being force-installed
+      # over whatever the runner ships by default — with r27d now current,
+      # setup-ndk's own caching/selection logic is simpler and one less
+      # hand-rolled step to keep correct across NDK version bumps.
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
 
       - name: Verify NDK toolchain paths
         run: |
-          TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$ANDROID_NDK}" >> "$GITHUB_ENV"
+          TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
-          echo "NDK OK: ${ANDROID_NDK_HOME}"
+          echo "NDK OK: ${ANDROID_NDK_HOME:-$ANDROID_NDK}"
 
       # ---------- 1b. ccache ----------
       # Everything above this point is seconds; the ~2h this job takes is almost
@@ -145,7 +151,51 @@ jobs:
           python3 -c "import sys; v=sys.version_info; assert v>=(3,10), f'need Python>=3.10, got {v}'"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3 g++ make git ca-certificates patchelf ccache
+            python3 g++ make git ca-certificates ccache
+
+      # ---------- 2b. patchelf (pinned upstream release, NOT apt) ----------
+      # Not using apt's patchelf here. On the v24-only reference build,
+      # ubuntu-24.04's apt patchelf (0.18.0-1.1build1) left DT_STRSZ pointing
+      # past end-of-file after this workflow's own four-call patchelf chain
+      # (set-soname, replace-needed, then two separate set-rpath calls) on
+      # the armeabi-v7a leg specifically — arm64-v8a's differently laid out
+      # symbol table happened not to trigger it. On-device this surfaces as
+      # "CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH (new
+      # hash type from the future?)", and the build step itself doesn't
+      # error, so it ships silently. This job runs on ubuntu-22.04 (an older
+      # apt patchelf than the 24.04 case above), so the exact bug isn't
+      # confirmed present here — but there's no reason to trust an even
+      # older apt package more, so pin to upstream's actual latest tagged
+      # release instead of whatever apt happens to carry. Resolve the
+      # /releases/latest redirect rather than hardcoding a version, so this
+      # self-heals as NixOS/patchelf ships further fixes, and fail loudly if
+      # that resolution doesn't produce a real vX.Y.Z-shaped tag rather than
+      # silently falling back to something unverified.
+      - name: Install patchelf (latest upstream release, pinned per-run)
+        run: |
+          LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+            https://github.com/NixOS/patchelf/releases/latest)"
+          PATCHELF_VERSION="${LATEST_URL##*/}"
+          echo "Resolved NixOS/patchelf latest release: $PATCHELF_VERSION"
+          if ! [[ "$PATCHELF_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Could not resolve a valid patchelf version from /releases/latest (got '$PATCHELF_VERSION'). Refusing to silently fall back to a possibly-buggy version — fix this step or pin PATCHELF_VERSION manually."
+            exit 1
+          fi
+
+          ASSET="patchelf-${PATCHELF_VERSION}-x86_64.tar.gz"
+          ASSET_URL="https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/${ASSET}"
+          curl -fsSL -o /tmp/patchelf.tar.gz "$ASSET_URL"
+          mkdir -p /tmp/patchelf-extracted
+          tar xzf /tmp/patchelf.tar.gz -C /tmp/patchelf-extracted
+          sudo install -m 0755 /tmp/patchelf-extracted/bin/patchelf /usr/local/bin/patchelf
+          hash -r
+
+          echo "---- patchelf version in use ----"
+          patchelf --version
+          RESOLVED="$(command -v patchelf)"
+          echo "Resolved patchelf binary: $RESOLVED"
+          [ "$RESOLVED" = "/usr/local/bin/patchelf" ] \
+            || { echo "::error::patchelf resolved to '$RESOLVED', not /usr/local/bin/patchelf — PATH ordering issue, apt's older copy (if installed) would silently win"; exit 1; }
 
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
@@ -928,6 +978,16 @@ jobs:
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
           export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
+          # Static-link libc++ -> single-file output where possible, no
+          # libc++_shared.so runtime dependency. Whether this actually takes
+          # effect depends on gyp's make-generator propagating LDFLAGS.target
+          # through both the 'node' and 'lib.target' link steps, which isn't
+          # guaranteed across every Node ref/gyp version — the packaging step
+          # below checks the real on-disk result with llvm-readelf rather
+          # than assuming this flag alone was enough, and bundles
+          # libc++_shared.so as a fallback only if it wasn't.
+          export CXXFLAGS="$CXXFLAGS -static-libstdc++"
+          export LDFLAGS="$LDFLAGS -static-libstdc++"
           export AR="$TC/bin/llvm-ar"
           export NM="$TC/bin/llvm-nm"
           export RANLIB="$TC/bin/llvm-ranlib"
@@ -986,8 +1046,10 @@ jobs:
           # libnode.so; leave commented unless the patch step above proves insufficient.
           # export GYP_DEFINES="$GYP_DEFINES v8_enable_webassembly=false"
 
-          # 16 KB page alignment for Android 15/16 devices
-          export LDFLAGS="-Wl,-z,max-page-size=16384"
+          # 16 KB page alignment for Android 15/16 devices. Append, don't
+          # overwrite — LDFLAGS already carries -static-libstdc++ from above,
+          # and a plain `export LDFLAGS="..."` here would silently drop it.
+          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384"
 
           EXTRA_FLAGS=""
           case "${{ inputs.profile || 'balanced' }}" in
@@ -1063,8 +1125,76 @@ jobs:
             patchelf --set-soname "$LIB" "$LIB"
             patchelf --replace-needed libnode.so "$LIB" node
           fi
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
-          ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+
+          # ---- $ORIGIN rpath ----
+          # This binary is spawned as a raw subprocess (not dlopen'd), so it
+          # does not automatically inherit the caller's library search path
+          # the way a dlopen'd .so would. $ORIGIN resolves relative to
+          # wherever node/$LIB actually end up at runtime, so this is correct
+          # regardless of the final install location.
+          patchelf --set-rpath '$ORIGIN' node
+          patchelf --set-rpath '$ORIGIN' "$LIB"
+
+          # ---- Verify patchelf didn't corrupt the dynamic section ----
+          # Known failure mode with older patchelf builds: chaining
+          # set-soname -> replace-needed -> set-rpath (x2) on the same
+          # dynamic-symbol-heavy .so can leave DT_STRSZ pointing past
+          # end-of-file, which the on-device bionic linker then reports as
+          # "empty/missing DT_HASH/DT_GNU_HASH (new hash type from the
+          # future?)" — GNU_HASH can still actually be present; a corrupted
+          # DT_STRSZ is just what makes the on-device linker unable to read
+          # it. This step doesn't error on its own, so a regression here
+          # would otherwise ship silently and only surface once it's already
+          # on someone's phone. The pinned-upstream-patchelf step earlier in
+          # this job exists to avoid reintroducing this in the first place;
+          # this assertion checks the actual on-disk result rather than
+          # trusting the pin alone.
+          for f in node "$LIB"; do
+            READELF_OUT="$("$TC/bin/llvm-readelf" -d "$f" 2>&1)"
+            if echo "$READELF_OUT" | grep -qi "goes past the end"; then
+              echo "::error::patchelf left a corrupted dynamic string table in '$f' — DT_STRSZ points past end-of-file. See llvm-readelf output below."
+              echo "$READELF_OUT"
+              exit 1
+            fi
+            if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
+              echo "::error::'$f' has neither DT_HASH nor DT_GNU_HASH after patchelf — this will fail to load on-device with 'CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH'."
+              echo "$READELF_OUT"
+              exit 1
+            fi
+          done
+          echo "patchelf output verified clean for node and $LIB (hash table intact, string table within bounds)."
+
+          # ---- Bundle libc++_shared.so only if still load-bearing ----
+          # -static-libstdc++ (CXXFLAGS/LDFLAGS, set in the cross-compile step
+          # above) is meant to make both 'node' and $LIB fully static w.r.t.
+          # libc++, but whether it actually took effect depends on gyp
+          # propagating LDFLAGS.target through both link steps, which isn't
+          # guaranteed across every Node ref/gyp version. Check the real
+          # NEEDED entries instead of assuming: bundle the shared runtime only
+          # if it's still actually referenced.
+          #
+          # Sysroot library directory naming does not always match the
+          # compiler-driver target triple: 32-bit ARM's compiler is prefixed
+          # armv7a-linux-androideabi<api>, but its sysroot/binutils libraries
+          # live under arm-linux-androideabi (no "v7a", no API suffix).
+          # aarch64 has no such split (driver prefix == sysroot triple).
+          echo "---- Remaining NEEDED entries ----"
+          "$TC/bin/llvm-readelf" -d node "$LIB" | grep NEEDED
+
+          if "$TC/bin/llvm-readelf" -d node "$LIB" | grep -q 'NEEDED.*libc++_shared'; then
+            echo "::warning::libc++_shared.so is still a real runtime dependency — -static-libstdc++ did not fully take effect this build. Bundling it."
+            case "${{ matrix.dest_cpu }}" in
+              arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
+              *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
+            esac
+            cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
+            ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          else
+            echo "libc++ is fully static in both node and $LIB — libc++_shared.so is not needed."
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
+            ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          fi
 
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
