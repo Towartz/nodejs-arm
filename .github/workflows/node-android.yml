@@ -1070,45 +1070,32 @@ jobs:
           # CRITICAL: host build tools must use the host compiler.
           # Without this, configure probes the ARM clang and thinks host_arch=arm,
           # and host tools (torque/mksnapshot) get built with the Android toolchain.
-          export CC_host="ccache gcc"
-          export CXX_host="ccache g++"
+          #
+          # V8's v8config.h requires host_arch to match dest_cpu's requirement:
+          #   target arm64 : host must be x64 or arm64
+          #   target arm   : host must be ia32 or arm  (x64 is NOT accepted)
+          # These macros come from the compiler's predefined macros (__x86_64__,
+          # __i386__), which depend on -m64/-m32. configure.py auto-detects
+          # host_arch from CC_host's macros and writes it into config.gypi,
+          # which then overwrites any host_arch set in GYP_DEFINES.
+          # Therefore CC_host MUST carry -m32 for the armeabi-v7a leg.
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            export CC_host="ccache gcc -m32"
+            export CXX_host="ccache g++ -m32"
+          else
+            export CC_host="ccache gcc"
+            export CXX_host="ccache g++"
+          fi
 
-          # V8 requires 32-bit host tools for 32-bit targets
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
             export CFLAGS_host=-m32 CXXFLAGS_host=-m32 LDFLAGS_host=-m32
-            # KNOWN ISSUE (armeabi-v7a only, unconfirmed against this exact repro):
-            # common.gypi unconditionally adds -m64 to host cflags/ldflags when
-            # host_arch=="x64" (which GH Actions runners auto-detect as, regardless
-            # of dest_cpu). Combined with the -m32 above, host tools may see both
-            # -m32 and -m64 on the same command line. Documented by the same
-            # engineer who maintains Termux's Node.js build, in the nodejs/node#57748
-            # PR description; a common.gypi.patch / v8.gyp.patch pair exists in
-            # Termux's packaging (github.com/termux/termux-packages, packages/nodejs-lts)
-            # to make cross-compiling for 32-bit not add -m64 to the host build, but
-            # neither patch is merged upstream as of this writing — fetch and review
-            # them directly from that repo before adopting, rather than trusting a
-            # hand-copied version here. armeabi-v7a is experimental/continue-on-error
-            # in this workflow already, so this is a "watch for" note, not a blocker.
-            #
-            # SEPARATE KNOWN ISSUE (also arm/32-bit specific): nodejs/node#58975,
-            # "Incorrect selection of x64 push_registers_asm.cc for host build when
-            # target is arm" — a gyp source-file-selection bug for the conservative-
-            # stack-scanning helper, distinct from the trap-handler fix below. Closed
-            # via nodejs/node#57748 but, per that PR's own description, not a complete
-            # fix. If the arm (32-bit) leg fails on an undefined push_registers_asm-
-            # related symbol specifically, that issue thread is the place to look.
+            HOST_ARCH_GYP="ia32"
+          else
+            HOST_ARCH_GYP="x64"
           fi
 
           # android_ndk_path is REQUIRED (node.gyp fails without it)
-          #
-          # host_arch/v8_host_arch=x64: defensive gyp hygiene, not a confirmed fix
-          # by itself. common.gypi keys its host -m64 cflag/ldflag on host_arch=="x64"
-          # explicitly (see common.gypi ~line 536), so pinning it removes ambiguity
-          # about what the host toolset resolves to. It does NOT appear to be the
-          # actual cause of the mksnapshot undefined-symbol error seen in this repo's
-          # CI run — that is a trap-handler.h source-selection issue, fixed by the
-          # patch step above (nodejs/node#36287). Kept here as harmless hardening.
-          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=x64 v8_host_arch=x64"
+          export GYP_DEFINES="OS=android host_os=linux target_arch=${{ matrix.dest_cpu }} v8_target_arch=${{ matrix.dest_cpu }} android_target_arch=${{ matrix.dest_cpu }} android_ndk_path=${ANDROID_NDK_HOME} host_arch=$HOST_ARCH_GYP v8_host_arch=$HOST_ARCH_GYP"
 
           # LAST-RESORT FALLBACK (only if trap-handler.h.patch above does not clear
           # the mksnapshot link error — e.g. the patch went stale for this Node
@@ -1118,10 +1105,14 @@ jobs:
           # libnode.so; leave commented unless the patch step above proves insufficient.
           # export GYP_DEFINES="$GYP_DEFINES v8_enable_webassembly=false"
 
-          # 16 KB page alignment for Android 15/16 devices. Append, don't
-          # overwrite — LDFLAGS already carries -static-libstdc++ from above,
-          # and a plain `export LDFLAGS="..."` here would silently drop it.
-          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384"
+          # 16 KB page alignment for Android 15/16 devices.
+          # -rdynamic (alias -Wl,--export-dynamic) exports all Node/V8 symbols
+          # from the node binary itself. Without --shared, gyp no longer creates
+          # a separate libnode.so and links node statically against the same
+          # objects. Those symbols need to remain visible because native addons
+          # (node-gyp/node-addon-api) and trap-handler/mksnapshot internals
+          # previously depended on the dynamic symbol table of libnode.so.
+          export LDFLAGS="$LDFLAGS -Wl,-z,max-page-size=16384 -rdynamic -Wl,--export-dynamic"
 
           EXTRA_FLAGS=""
           case "${{ inputs.profile || 'balanced' }}" in
@@ -1139,7 +1130,6 @@ jobs:
             --cross-compiling \
             --dest-os=android \
             --dest-cpu=${{ matrix.dest_cpu }} \
-            --shared \
             --with-intl=none \
             --without-npm \
             $NODEEXTRA \
@@ -1151,135 +1141,313 @@ jobs:
           # Build ONLY the 'node' target: produces both out/Release/node (CLI)
           # and out/Release/lib.target/libnode.so (shared library). Skip cctest
           # and other test/auxiliary targets to save 5-10 minutes of build time.
-          # dest_cpu=arm adds -m32 to host tools, but push_registers_asm.cc needs x64.
-          HOST_M64=""; [ "${{ matrix.dest_cpu }}" = "arm" ] && HOST_M64="-m64"
-          make -j"$(nproc)" node CC.host="ccache gcc $HOST_M64" CXX.host="ccache g++ $HOST_M64" LINK.host="g++ $HOST_M64" AR.host=ar
+          # For arm target, host tools MUST be compiled with -m32 so that
+          # configure.py detects host_arch=ia32 and v8.gyp selects
+          # ia32/push_registers_asm.cc instead of the x64 version.
+          if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
+            make -j"$(nproc)" node CC.host="ccache gcc -m32" CXX.host="ccache g++ -m32" LINK.host="g++ -m32" AR.host=ar
+          else
+            make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
+          fi
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
 
       # ---------- 5. Rename, strip, package ----------
-      - name: Package lib${{ env.LIB_NAME }}.so + node
+      # Without --shared, ./configure + make only produces one file:
+      # out/Release/node. All Node/V8 symbols (previously in libnode.so)
+      # are already inside this binary itself, exported via
+      # -rdynamic/--export-dynamic set in the build step. There is no
+      # separate libnode.so, so no need to find, strip, or patchelf one.
+      - name: Package node (single binary, all symbols exported)
         if: success()
         working-directory: node
         run: |
           TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
-          LIB="lib${LIB_NAME}.so"
 
-          # Diagnostic: confirm where libnode.so actually landed.
-          # The ninja.py patch above changes SHARED_INTERMEDIATE_DIR and adds an
-          # $|OBJ toolset suffix, which can move the .so out of lib.target.
-          echo "Searching for libnode.so in out/Release..."
-          find out/Release -name "libnode.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
           echo "Directory structure under out/Release:"
           find out/Release -maxdepth 3 -type d
 
-          if [ -f "out/Release/lib.target/libnode.so" ]; then
-            LIB_PATH="out/Release/lib.target/libnode.so"
-          elif [ -f "out/Release/libnode.so" ]; then
-            echo "Found at out/Release/libnode.so instead of lib.target/"
-            LIB_PATH="out/Release/libnode.so"
-          elif [ -f "out/Release/obj.target/libnode.so" ]; then
-            echo "Found at out/Release/obj.target/libnode.so instead of lib.target/"
-            LIB_PATH="out/Release/obj.target/libnode.so"
-          else
-            echo "::error::libnode.so not found in any expected location"
+          if [ ! -f "out/Release/node" ]; then
+            echo "::error::out/Release/node not found — build step may have failed"
             exit 1
           fi
 
-          "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
-          # Self-copy guard: don't cp if src and dest are the same inode
-          [ "$(readlink -f "$LIB_PATH")" = "$(readlink -f "$LIB")" ] || cp "$LIB_PATH" "$LIB"
-          [ "$(readlink -f out/Release/node)" = "$(readlink -f node)" ] || cp out/Release/node node
-          "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
-          "$TC/bin/llvm-strip" --strip-all node
-          if [ "$LIB_NAME" != "node" ]; then
-            patchelf --set-soname "$LIB" "$LIB"
-            patchelf --replace-needed libnode.so "$LIB" node
+          "$TC/bin/llvm-readelf" -h "out/Release/node" | grep -E 'Class|Machine|Type'
+
+          # Same flattened-layout quirk affects the CLI binary: on some
+          # gyp/make configs out/Release/node IS the working-directory root's
+          # "node" (this dir was created by `git clone ... node`), so
+          # `cp out/Release/node node` copies a file onto itself and `cp`
+          # aborts with exit 1. Only copy when source and dest actually differ.
+          if [ ! -e node ] || [ "$(readlink -f out/Release/node)" != "$(readlink -f node)" ]; then
+            cp out/Release/node node
+          else
+            echo "out/Release/node and node are already the same file, skipping copy"
           fi
 
-          # ---- $ORIGIN rpath ----
-          # This binary is spawned as a raw subprocess (not dlopen'd), so it
-          # does not automatically inherit the caller's library search path
-          # the way a dlopen'd .so would. $ORIGIN resolves relative to
-          # wherever node/$LIB actually end up at runtime, so this is correct
-          # regardless of the final install location.
-          patchelf --set-rpath '$ORIGIN' node
-          patchelf --set-rpath '$ORIGIN' "$LIB"
+          # --export-dynamic marks symbols via .dynsym, not via regular symtab,
+          # so strip-all is still safe and does not remove already-exported symbols.
+          "$TC/bin/llvm-strip" --strip-all node
 
-          # ---- Verify patchelf didn't corrupt the dynamic section ----
-          # Known failure mode with older patchelf builds: chaining
-          # set-soname -> replace-needed -> set-rpath (x2) on the same
-          # dynamic-symbol-heavy .so can leave DT_STRSZ pointing past
-          # end-of-file, which the on-device bionic linker then reports as
-          # "empty/missing DT_HASH/DT_GNU_HASH (new hash type from the
-          # future?)" — GNU_HASH can still actually be present; a corrupted
-          # DT_STRSZ is just what makes the on-device linker unable to read
-          # it. This step doesn't error on its own, so a regression here
-          # would otherwise ship silently and only surface once it's already
-          # on someone's phone. The pinned-upstream-patchelf step earlier in
-          # this job exists to avoid reintroducing this in the first place;
-          # this assertion checks the actual on-disk result rather than
-          # trusting the pin alone.
-          for f in node "$LIB"; do
-            READELF_OUT="$("$TC/bin/llvm-readelf" -d "$f" 2>&1)"
-            if echo "$READELF_OUT" | grep -qi "goes past the end"; then
-              echo "::error::patchelf left a corrupted dynamic string table in '$f' — DT_STRSZ points past end-of-file. See llvm-readelf output below."
-              echo "$READELF_OUT"
-              exit 1
-            fi
-            if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
-              echo "::error::'$f' has neither DT_HASH nor DT_GNU_HASH after patchelf — this will fail to load on-device with 'CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH'."
-              echo "$READELF_OUT"
-              exit 1
-            fi
-          done
-          echo "patchelf output verified clean for node and $LIB (hash table intact, string table within bounds)."
+          # Verify node's ELF type: must be ET_DYN (shared object) so it remains
+          # directly executable (PIE) while also valid for dlopen if ever needed.
+          echo "---- ELF type check ----"
+          "$TC/bin/llvm-readelf" -h node | grep -E 'Class|Machine|Type'
+          echo "---- Exported dynamic symbol count ----"
+          "$TC/bin/llvm-readelf" --dyn-syms node | wc -l
 
-          # ---- Bundle libc++_shared.so only if still load-bearing ----
-          # -static-libstdc++ (CXXFLAGS/LDFLAGS, set in the cross-compile step
-          # above) is meant to make both 'node' and $LIB fully static w.r.t.
-          # libc++, but whether it actually took effect depends on gyp
-          # propagating LDFLAGS.target through both link steps, which isn't
-          # guaranteed across every Node ref/gyp version. Check the real
-          # NEEDED entries instead of assuming: bundle the shared runtime only
-          # if it's still actually referenced.
+          # ---- Bundle libc++_shared.so + bake $ORIGIN rpath ----
+          # Downstream consumer spawns this binary as a raw subprocess via
+          # ProcessBuilder, not via System.loadLibrary()/dlopen. Android only
+          # grants the app's nativeLibraryDir to the linker namespace
+          # automatically for the dlopen path; a manually exec'd child process
+          # does NOT inherit that search path unless the caller explicitly sets
+          # LD_LIBRARY_PATH, or the binary carries its own rpath. The
+          # -static-libstdc++ flag set in CXXFLAGS/LDFLAGS earlier is the
+          # documented way to avoid this dependency entirely, but whether it
+          # actually took effect depends on gyp propagating LDFLAGS.target
+          # through the link step, which isn't guaranteed across every Node
+          # ref/gyp version. Ship libc++_shared.so and set $ORIGIN unconditionally
+          # as a belt-and-braces fallback: harmless if static linking succeeded
+          # (rpath simply goes unused), and load-bearing if it didn't.
           #
-          # Sysroot library directory naming does not always match the
+          # Sysroot library directory naming does NOT always match the
           # compiler-driver target triple: 32-bit ARM's compiler is prefixed
           # armv7a-linux-androideabi<api>, but its sysroot/binutils libraries
-          # live under arm-linux-androideabi (no "v7a", no API suffix).
-          # aarch64 has no such split (driver prefix == sysroot triple).
-          echo "---- Remaining NEEDED entries ----"
-          "$TC/bin/llvm-readelf" -d node "$LIB" | grep NEEDED
+          # live under arm-linux-androideabi (no "v7a", no API suffix) —
+          # confirmed against developer.android.com/ndk/guides/other_build_systems.
+          # aarch64/x86_64 targets have no such split (driver prefix ==
+          # sysroot triple), so only the 32-bit leg needs remapping.
+          case "${{ matrix.dest_cpu }}" in
+            arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
+            *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
+          esac
+          cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
 
-          if "$TC/bin/llvm-readelf" -d node "$LIB" | grep -q 'NEEDED.*libc++_shared'; then
-            echo "::warning::libc++_shared.so is still a real runtime dependency — -static-libstdc++ did not fully take effect this build. Bundling it."
-            case "${{ matrix.dest_cpu }}" in
-              arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
-              *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
-            esac
-            cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
-            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
-            ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
-          else
-            echo "libc++ is fully static in both node and $LIB — libc++_shared.so is not needed."
-            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
-            ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          # $ORIGIN resolves relative to whichever directory node actually
+          # ends up in at runtime (jniLibs' flattened nativeLibraryDir
+          # on-device, or the current directory in a manual Termux test) —
+          # correct for both the dlopen and raw-exec consumption models.
+          patchelf --set-rpath '$ORIGIN' node
+
+          # ---- Verify patchelf didn't corrupt the dynamic section ----
+          # Traced a real on-device failure back to a similar patchelf
+          # sequence in an earlier run (before this single-binary approach):
+          # patchelf (apt's 0.18.0-1.1build1) left DT_STRSZ pointing past
+          # end-of-file on the armeabi-v7a leg, which the bionic linker
+          # on-device then misreports as "empty/missing DT_HASH/DT_GNU_HASH —
+          # new hash type from the future?" (it can't safely walk a dynamic
+          # section it can't fully parse) — GNU_HASH was actually still
+          # present in the file; the corrupted DT_STRSZ is what made the
+          # on-device linker unable to read it. The actual root cause never
+          # surfaced in CI at all — the build step above happily "succeeds"
+          # either way, since patchelf itself doesn't error on this. The
+          # Install-patchelf step earlier in this job now pins a much newer
+          # upstream release specifically to avoid reintroducing this, but
+          # pin-and-hope isn't a check: assert the actual on-disk result
+          # here, so a future regression — upstream or otherwise — fails
+          # this job loudly instead of silently shipping a broken artifact
+          # that only fails once it's already on someone's phone.
+          READELF_OUT="$("$TC/bin/llvm-readelf" -d node 2>&1)"
+          if echo "$READELF_OUT" | grep -qi "goes past the end"; then
+            echo "::error::patchelf left a corrupted dynamic string table in 'node' — DT_STRSZ points past end-of-file. See llvm-readelf output below."
+            echo "$READELF_OUT"
+            exit 1
           fi
+          if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
+            echo "::error::'node' has neither DT_HASH nor DT_GNU_HASH after patchelf — this will fail to load on-device with 'CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH'."
+            echo "$READELF_OUT"
+            exit 1
+          fi
+          echo "patchelf output verified clean for node (hash table intact, string table within bounds)."
+
+          # Sanity check: surface any *other* unexpected external dependency
+          # here in CI rather than discovering it later on a real device.
+          # libc/libm/libdl/liblog are always provided by the Android
+          # platform itself and are expected; everything else listed below
+          # should already be either statically linked or bundled in this
+          # tar.gz (libc++_shared.so).
+          echo "---- Remaining NEEDED entries (expect only platform libs + libc++_shared.so) ----"
+          "$TC/bin/llvm-readelf" -d node | grep NEEDED
+
+          # ---- Enforce single-file goal: only bundle libc++_shared.so if it's
+          # ---- actually still load-bearing. -static-libstdc++ (set in
+          # ---- CXXFLAGS/LDFLAGS earlier in this workflow) is supposed to make
+          # ---- node fully static w.r.t. libc++, but whether it actually took
+          # ---- effect depends on gyp's make-generator propagating
+          # ---- LDFLAGS.target through the link step, which isn't guaranteed
+          # ---- across every Node ref/gyp version. This was previously an
+          # ---- echo-only check — a silent regression here would just mean
+          # ---- libc++_shared.so quietly stays load-bearing forever with no
+          # ---- signal. Now it's asserted: if NEEDED is clean, drop
+          # ---- libc++_shared.so from the tar.gz entirely.
+          if "$TC/bin/llvm-readelf" -d node | grep -q 'NEEDED.*libc++_shared'; then
+            echo "::warning::libc++_shared.so is still a real runtime dependency — -static-libstdc++ did not fully take effect this build. Keeping it bundled."
+            BUNDLE_LIBCXX=1
+          else
+            echo "libc++ is fully static in node — libc++_shared.so is no longer needed."
+            BUNDLE_LIBCXX=0
+          fi
+
+          if [ "$BUNDLE_LIBCXX" = "1" ]; then
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node libc++_shared.so
+            ls -lh node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          else
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
+            ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          fi
+
+      # ---------- 5b. Package Node.js headers (native addon builds) ----------
+      # Each ABI gets its own header zip, NOT merged into one.
+      # Reason: config.gypi is generated by ./configure per-leg and its
+      # contents differ per ABI (target_arch, byteorder, etc). Using arm64-v8a
+      # headers to compile native addons against an armeabi-v7a runtime (or
+      # vice versa) produces wrong config.gypi and can cause addon build
+      # failures or ABI mismatch on device.
+      #
+      # Layout include/node/*.h follows the official node-vX.Y.Z-headers.tar.gz
+      # structure from nodejs.org — this is what node-gyp/node-addon-api reads
+      # via `npm config set nodedir=...` when compiling native modules.
+      - name: Package Node.js headers (${{ matrix.abi }})
+        if: success()
+        working-directory: node
+        run: |
+          HDR_DIR="node-headers/include/node"
+          mkdir -p "$HDR_DIR"
+
+          cp common.gypi "$HDR_DIR/"
+          cp config.gypi "$HDR_DIR/"
+          cp src/*.h "$HDR_DIR/"
+          cp -r deps/v8/include/. "$HDR_DIR/"
+          cp -r deps/uv/include/. "$HDR_DIR/"
+
+          echo "---- Header contents per ABI (${{ matrix.abi }}) ----"
+          find "$HDR_DIR" -maxdepth 1 -name "*.h" | wc -l
+          grep -E "target_arch|byteorder" "$HDR_DIR/config.gypi"
+
+          cd node-headers
+          zip -rq "../../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip" include
+          cd ..
+          ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
 
       # ---------- 6a. Upload artifact ----------
       - name: Upload artifact
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
           path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
           retention-days: 14
 
-      # ---------- 6b. Attach to GitHub Release (tag pushes only) ----------
-      - name: Attach to GitHub Release
-        if: success() && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      # ---------- 6b. Upload headers artifact ----------
+      # Artifact name gets a -headers suffix so it differs from the binary
+      # artifact above. The release job below downloads both via separate
+      # patterns.
+      - name: Upload headers artifact
+        if: success()
+        uses: actions/upload-artifact@v7
         with:
-          files: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
+          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers.zip
+          retention-days: 14
+
+
+  # ---------- Release ----------
+  # Single job, runs once after all matrix legs finish (armeabi-v7a's
+  # continue-on-error keeps this from being blocked by that experimental
+  # leg failing — see `build.strategy.matrix` above). Downloads whatever
+  # per-ABI artifacts got uploaded and attaches all of them to one release,
+  # auto-naming/auto-tagging when the run wasn't itself a tag push so every
+  # workflow_dispatch/branch-push build still gets a release without manual
+  # tagging, and using GitHub's own commit-based changelog generation.
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: success()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # Re-derive NODE_REF/LIB_NAME here rather than plumbing them out of
+      # the matrix `build` job: GITHUB_ENV set inside a job's steps is not
+      # visible to other jobs, and matrix job `outputs:` only reliably
+      # expose whichever matrix leg's write happens to finish last — for
+      # values that are identical across every leg (as these are; they come
+      # from workflow_dispatch inputs shared by the whole matrix, not from
+      # anything ABI-specific), redoing this ~10-line normalization here is
+      # simpler and unambiguous than relying on that ordering behavior.
+      - name: Resolve inputs
+        env:
+          NODE_VERSION_CHOICE: ${{ inputs.node_version || 'v26.x' }}
+          CUSTOM_REF_RAW: ${{ inputs.custom_ref }}
+          LIB_NAME_RAW: ${{ inputs.lib_name || 'node' }}
+        run: |
+          REQ="$NODE_VERSION_CHOICE"
+          if [ "$REQ" = "custom" ]; then REQ="$CUSTOM_REF_RAW"; fi
+          test -n "$REQ" || REQ="v26.x"
+          echo "NODE_REF=$REQ" >> "$GITHUB_ENV"
+
+          NAME="$LIB_NAME_RAW"
+          NAME="${NAME#lib}"; NAME="${NAME%.so}"
+          echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
+
+          # Tag: reuse the pushed tag verbatim when this run WAS a tag push
+          # (respects a manually-chosen version tag like v26.0.1-android);
+          # otherwise synthesize one from build metadata + run_number so
+          # workflow_dispatch/branch-push runs are still unique and
+          # traceable back to the run that produced them, with no manual
+          # tagging step required.
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            SAFE_REF="$(echo "$REQ" | tr -c 'A-Za-z0-9_.-' '-')"
+            echo "RELEASE_TAG=${NAME}-android-${SAFE_REF}-run${{ github.run_number }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download all ABI artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: ${{ env.LIB_NAME }}-android-*
+          path: dist
+          merge-multiple: true
+          if-no-artifact-found: warn  # armeabi-v7a is experimental — its artifact may legitimately be absent
+
+      - name: List downloaded artifacts
+        run: ls -lh dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
+
+      - name: Create/Update GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "${{ env.LIB_NAME }} — Node ${{ env.NODE_REF }} for Android (build #${{ github.run_number }})"
+          # GitHub's own commit-based auto changelog (compares against the
+          # previous release's tag). softprops/action-gh-release prepends
+          # the custom `body` below to these generated notes rather than
+          # replacing them.
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          body: |
+            **Automated Android build**
+
+            | | |
+            |---|---|
+            | Node.js ref | `${{ env.NODE_REF }}` |
+            | Artifact label | `${{ env.LIB_NAME }}` |
+            | Build profile | `${{ inputs.profile || 'balanced' }}` |
+            | NDK version | `${{ env.NDK_VERSION }}` |
+            | Trigger | `${{ github.event_name }}` |
+            | Commit | `${{ github.sha }}` |
+
+            arm64-v8a is always included when the build succeeds; armeabi-v7a
+            is experimental and only present below if that leg also succeeded.
+            Binary inside each tar.gz is named `node` (single ELF, PIE, all
+            symbols exported via -rdynamic/--export-dynamic) — rename it to
+            lib*.so yourself downstream if your app needs Android to extract
+            it with exec permissions.
+
+            Each ABI also ships a `*-headers.zip` (Node.js includes +
+            `config.gypi`) for compiling native N-API addons against that
+            specific build. Use the headers matching the target ABI —
+            `config.gypi` differs between arm64-v8a and armeabi-v7a.
+          files: dist/*
