@@ -348,6 +348,51 @@ jobs:
                 '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
           PYEOF
 
+      - name: "Patch V8: consteval/immediate-escalation clang bug in regexp bytecode dispatch"
+        # clang bug: llvm-project#94935 — a consteval function called with an
+        # argument that depends on an enclosing template/lambda parameter is
+        # not correctly recognized as an immediate invocation. Filed Jun 2024,
+        # partially fixed Jun 2024 (llvm-project#95233), more completely fixed
+        # ~Jan 2025 (llvm-project#124404). NDK r27d's Clang snapshot predates
+        # the complete fix, so it rejects this pattern in
+        # deps/v8/src/regexp/regexp-bytecodes-inl.h, which surfaces as:
+        #   "cannot take address of consteval function 'Type'/'Offset' outside
+        #   of an immediate invocation" in regexp-bytecode-generator.cc, and
+        #   "call to immediate function ... is not a constant expression" in
+        #   regexp-bytecode-analysis.cc.
+        # Fix: downgrade the four accessor functions from consteval to
+        # constexpr. They're only ever called in constant-expression contexts
+        # in this codebase, so this is semantically a no-op here — it just
+        # avoids clang's buggy immediate-escalation code path. Verified
+        # against clang-18.1.3 (a close match for r27d's vintage) with
+        # isolated repros of both failure sites before submitting this patch.
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+          def patch(path, old, new):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"::warning::file not found {path} (skipping)")
+                  return
+              s = p.read_text()
+              if old not in s:
+                  print(f"::warning::context not found in {path}")
+                  return
+              p.write_text(s.replace(old, new, 1))
+              print(f"patched {path}")
+
+          f = 'deps/v8/src/regexp/regexp-bytecodes-inl.h'
+          patch(f, 'static consteval int Index(Operand op)',
+                   'static constexpr int Index(Operand op)')
+          patch(f, 'static consteval int Size(Operand op) {',
+                   'static constexpr int Size(Operand op) {')
+          patch(f, 'static consteval int Offset(Operand op) {',
+                   'static constexpr int Offset(Operand op) {')
+          patch(f, 'static consteval RegExpBytecodeOperandType Type(Operand op) {',
+                   'static constexpr RegExpBytecodeOperandType Type(Operand op) {')
+          PYEOF
+
       - name: "Patch V8: zlib cpu_features (getauxval replacement)"
         working-directory: node
         run: |
