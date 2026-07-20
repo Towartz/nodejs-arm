@@ -1,6 +1,7 @@
 # .github/workflows/node-android.yml
 # Cross-compiles Node.js for Android: arm64-v8a (verified) + armeabi-v7a (experimental,
-# see nodejs/node#58975). Produces per ABI: lib<n>.so + node CLI binary.
+# see nodejs/node#58975). Produces per ABI: satu file node (ELF PIE, semua symbol
+# Node/V8 diexport lewat -rdynamic/--export-dynamic; tidak ada libnode.so terpisah).
 #
 # Downstream consumer: AuroraChat-Android (see AGENTS.MD). That project's
 # AuroraNodeBridgePlugin spawns the `node` binary as a raw subprocess
@@ -10,8 +11,8 @@
 # (see the libc++_shared.so + $ORIGIN rpath step below): a raw-exec'd child
 # process does not automatically inherit the app's nativeLibraryDir search
 # path the way a dlopen'd library would, so every runtime dependency of
-# `node`/lib<n>.so must either be statically linked or discoverable via an
-# rpath baked into the binary itself.
+# `node` must either be statically linked or discoverable via an rpath
+# baked into the binary itself.
 name: Node.js for Android (ARM)
 
 on:
@@ -40,7 +41,7 @@ on:
         required: false
         default: ''
       lib_name:
-        description: 'Library name — output will be lib<n>.so (e.g. "aurora" → libaurora.so)'
+        description: 'Label for this build — used only in the artifact/tar.gz filename (e.g. "aurora" → aurora-android-<abi>.tar.gz). The binary inside stays named `node`; rename it to a lib*.so downstream if your app needs Android to extract it with exec permissions (see AGENTS.MD).'
         required: false
         default: 'node'
       profile:
@@ -138,7 +139,7 @@ jobs:
             echo "::error::Invalid lib_name '$NAME'"; exit 1
           fi
           echo "LIB_NAME=$NAME" >> "$GITHUB_ENV"
-          echo "Building Node.js '$REQ' as lib$NAME.so"
+          echo "Building Node.js '$REQ' — artifact label: $NAME (binary itself stays named 'node')"
 
       # ---------- 1. Android NDK ----------
       # @v1 is a floating major tag; it already resolves to 1.5.0 (current as of
@@ -202,26 +203,23 @@ jobs:
           echo "python3 $PYVER OK"
 
       # ---------- 2b. patchelf (pinned upstream release, NOT apt) ----------
-      # Root cause of the on-device "CANNOT LINK EXECUTABLE ... empty/missing
+      # Root cause of an on-device "CANNOT LINK EXECUTABLE ... empty/missing
       # DT_HASH/DT_GNU_HASH (new hash type from the future?)" failure traced
-      # to this exact CI run: ubuntu-24.04's apt package is patchelf
+      # to an earlier CI run: ubuntu-24.04's apt package is patchelf
       # 0.18.0-1.1build1. That upstream 0.18.0 release itself shipped two
       # relevant strtab/section-resize fixes (NixOS/patchelf#481 "Do not let
       # modifyRPath taint shared strings in strtab", fixing #315; and
       # NixOS/patchelf#485 "Resize segment mapping rewritten sections if
-      # needed", fixing #482) — but this workflow's own package step chains
-      # FOUR patchelf calls back-to-back on the same 67MB, dynamic-symbol-heavy
-      # libnode.so (set-soname, then replace-needed, then two separate
-      # set-rpath calls, one of which runs AFTER the soname/needed rewrite
-      # already resized the string table once) once for the CLI binary, once
-      # for the renamed lib. That's a harder edit sequence than a single
-      # set-rpath, and it reproduced DT_STRSZ pointing past EOF on the
-      # armeabi-v7a (32-bit) leg specifically (arm64-v8a's smaller/differently
-      # laid out symbol table happened not to trigger it). Pin to upstream's
-      # actual latest tagged release rather than trusting apt or hardcoding a
-      # version here, so this self-heals as NixOS/patchelf ships further
-      # fixes: resolve the redirect target of /releases/latest, extract the
-      # tag, and fail loudly (not silently fall back to a stale copy) if that
+      # needed", fixing #482). That earlier failure happened under a heavier
+      # multi-call patchelf sequence (set-soname + replace-needed + set-rpath
+      # on both a CLI binary and a separate renamed libnode.so, back when
+      # this workflow still built with --shared). This workflow now builds a
+      # single `node` binary and only runs one set-rpath call on it, which is
+      # a much simpler edit — but keep pinning upstream's actual latest
+      # tagged release rather than trusting apt or hardcoding a version here,
+      # so this stays self-healing as NixOS/patchelf ships further fixes:
+      # resolve the redirect target of /releases/latest, extract the tag,
+      # and fail loudly (not silently fall back to a stale copy) if that
       # resolution doesn't produce a real vX.Y.Z-shaped tag.
       - name: Install patchelf (latest upstream release, pinned per-run)
         run: |
@@ -844,8 +842,14 @@ jobs:
           # libnode.so; leave commented unless the patch step above proves insufficient.
           # export GYP_DEFINES="$GYP_DEFINES v8_enable_webassembly=false"
 
-          # 16 KB page alignment for Android 15/16 devices
-          export LDFLAGS="-Wl,-z,max-page-size=16384"
+          # 16 KB page alignment for Android 15/16 devices.
+          # -rdynamic (alias -Wl,--export-dynamic) mengekspos semua symbol Node/V8
+          # dari binary node itu sendiri. Tanpa --shared, gyp tidak lagi membuat
+          # libnode.so terpisah dan me-link node secara statis terhadap objek yang
+          # sama. Symbol-symbol itu perlu tetap terlihat karena native addon
+          # (node-gyp/node-addon-api) dan trap-handler/mksnapshot internal
+          # sebelumnya bergantung pada dynamic symbol table libnode.so.
+          export LDFLAGS="-Wl,-z,max-page-size=16384 -rdynamic -Wl,--export-dynamic"
 
           EXTRA_FLAGS=""
           case "${{ inputs.profile || 'balanced' }}" in
@@ -863,7 +867,6 @@ jobs:
             --cross-compiling \
             --dest-os=android \
             --dest-cpu=${{ matrix.dest_cpu }} \
-            --shared \
             --with-intl=none \
             --without-npm \
             $NODEEXTRA \
@@ -872,9 +875,10 @@ jobs:
 
           # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
           # in some configurations, silently breaking host-tool linking).
-          # Build ONLY the 'node' target: produces both out/Release/node (CLI)
-          # and out/Release/lib.target/libnode.so (shared library). Skip cctest
-          # and other test/auxiliary targets to save 5-10 minutes of build time.
+          # Build ONLY the 'node' target: tanpa --shared ini menghasilkan satu
+          # binary out/Release/node saja (semua symbol Node/V8 ada di dalamnya,
+          # tidak ada lib.target/libnode.so terpisah). Skip cctest dan target
+          # test/auxiliary lain untuk hemat 5-10 menit waktu build.
           #
           # CORRECTED: CC.host/CXX.host here MUST carry -m32 for the armeabi-v7a
           # leg, matching CC_host/CXX_host set before ./configure above. Verified
@@ -912,37 +916,26 @@ jobs:
           ccache -s
 
       # ---------- 5. Rename, strip, package ----------
-      - name: Package lib${{ env.LIB_NAME }}.so + node
+      # Tanpa --shared, ./configure + make hanya menghasilkan satu file:
+      # out/Release/node. Semua symbol Node/V8 (yang sebelumnya ada di
+      # libnode.so) sudah ada di dalam binary ini sendiri, diekspor lewat
+      # -rdynamic/--export-dynamic yang di-set di step build. Tidak ada lagi
+      # libnode.so terpisah, jadi tidak perlu dicari, di-strip, atau di-patchelf.
+      - name: Package node (single binary, semua symbol diexport)
         if: success()
         working-directory: node
         run: |
           TC="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
-          LIB="lib${LIB_NAME}.so"
 
-          # Diagnostic: confirm where libnode.so actually landed. On this NDK/Node
-          # combo the .so has been seen to land outside out/Release/lib.target
-          # (e.g. straight under out/Release, or under obj.target) depending on
-          # gyp's generator config, so search instead of hardcoding one path.
-          echo "Searching for libnode.so in out/Release..."
-          find out/Release -name "libnode.so" -type f 2>/dev/null || echo "NOT FOUND in out/Release"
           echo "Directory structure under out/Release:"
           find out/Release -maxdepth 3 -type d
 
-          if [ -f "out/Release/lib.target/libnode.so" ]; then
-            LIB_PATH="out/Release/lib.target/libnode.so"
-          elif [ -f "out/Release/libnode.so" ]; then
-            echo "Found at out/Release/libnode.so instead of lib.target/"
-            LIB_PATH="out/Release/libnode.so"
-          elif [ -f "out/Release/obj.target/libnode.so" ]; then
-            echo "Found at out/Release/obj.target/libnode.so instead of lib.target/"
-            LIB_PATH="out/Release/obj.target/libnode.so"
-          else
-            echo "::error::libnode.so not found in any expected location"
+          if [ ! -f "out/Release/node" ]; then
+            echo "::error::out/Release/node not found — build step may have failed"
             exit 1
           fi
 
-          "$TC/bin/llvm-readelf" -h "$LIB_PATH" | grep -E 'Class|Machine|Type'
-          cp "$LIB_PATH" "$LIB"
+          "$TC/bin/llvm-readelf" -h "out/Release/node" | grep -E 'Class|Machine|Type'
 
           # Same flattened-layout quirk affects the CLI binary: on some
           # gyp/make configs out/Release/node IS the working-directory root's
@@ -955,12 +948,18 @@ jobs:
             echo "out/Release/node and node are already the same file, skipping copy"
           fi
 
-          "$TC/bin/llvm-strip" --strip-unneeded "$LIB"
+          # --export-dynamic menandai symbol lewat .dynsym, bukan lewat symtab
+          # biasa, jadi strip-all tetap aman dan tidak menghapus symbol yang
+          # sudah diekspor.
           "$TC/bin/llvm-strip" --strip-all node
-          if [ "$LIB_NAME" != "node" ]; then
-            patchelf --set-soname "$LIB" "$LIB"
-            patchelf --replace-needed libnode.so "$LIB" node
-          fi
+
+          # Verify node's ELF type: harus ET_DYN (shared object) supaya tetap
+          # bisa langsung dieksekusi (PIE) sekaligus valid untuk dlopen kalau
+          # someday dibutuhkan, walau downstream saat ini hanya raw-exec.
+          echo "---- ELF type check ----"
+          "$TC/bin/llvm-readelf" -h node | grep -E 'Class|Machine|Type'
+          echo "---- Exported dynamic symbol count ----"
+          "$TC/bin/llvm-readelf" --dyn-syms node | wc -l
 
           # ---- Bundle libc++_shared.so + bake $ORIGIN rpath ----
           # Downstream consumer (AuroraChat-Android / AGENTS.MD) spawns this
@@ -994,82 +993,77 @@ jobs:
           esac
           cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
 
-          # $ORIGIN resolves relative to whichever directory node/$LIB
-          # actually end up in at runtime (jniLibs' flattened nativeLibraryDir
+          # $ORIGIN resolves relative to whichever directory node actually
+          # ends up in at runtime (jniLibs' flattened nativeLibraryDir
           # on-device, or the current directory in a manual Termux test) —
           # correct for both the dlopen and raw-exec consumption models.
           patchelf --set-rpath '$ORIGIN' node
-          patchelf --set-rpath '$ORIGIN' "$LIB"
 
           # ---- Verify patchelf didn't corrupt the dynamic section ----
-          # Traced a real on-device failure back to exactly this four-call
-          # patchelf sequence (set-soname -> replace-needed -> set-rpath x2)
-          # in an earlier run: patchelf (apt's 0.18.0-1.1build1) left
-          # DT_STRSZ pointing past end-of-file on the armeabi-v7a leg after
-          # this exact chain, which the bionic linker on-device then
-          # misreports as "empty/missing DT_HASH/DT_GNU_HASH — new hash type
-          # from the future?" (it can't safely walk a dynamic section it
-          # can't fully parse) — GNU_HASH was actually still present in the
-          # file; the corrupted DT_STRSZ is what made the on-device linker
-          # unable to read it. The actual root cause never surfaced in CI at
-          # all — the build step above happily "succeeds" either way, since
-          # patchelf itself doesn't error on this. The Install-patchelf step
-          # earlier in this job now pins a much newer upstream release
-          # specifically to avoid reintroducing this, but pin-and-hope isn't
-          # a check: assert the actual on-disk result here, for both files
-          # patchelf just touched (node depends on $LIB via NEEDED, so both
-          # matter), so a future regression — upstream or otherwise — fails
+          # Traced a real on-device failure back to a similar patchelf
+          # sequence in an earlier run (before this single-binary approach):
+          # patchelf (apt's 0.18.0-1.1build1) left DT_STRSZ pointing past
+          # end-of-file on the armeabi-v7a leg, which the bionic linker
+          # on-device then misreports as "empty/missing DT_HASH/DT_GNU_HASH —
+          # new hash type from the future?" (it can't safely walk a dynamic
+          # section it can't fully parse) — GNU_HASH was actually still
+          # present in the file; the corrupted DT_STRSZ is what made the
+          # on-device linker unable to read it. The actual root cause never
+          # surfaced in CI at all — the build step above happily "succeeds"
+          # either way, since patchelf itself doesn't error on this. The
+          # Install-patchelf step earlier in this job now pins a much newer
+          # upstream release specifically to avoid reintroducing this, but
+          # pin-and-hope isn't a check: assert the actual on-disk result
+          # here, so a future regression — upstream or otherwise — fails
           # this job loudly instead of silently shipping a broken artifact
           # that only fails once it's already on someone's phone.
-          for f in node "$LIB"; do
-            READELF_OUT="$("$TC/bin/llvm-readelf" -d "$f" 2>&1)"
-            if echo "$READELF_OUT" | grep -qi "goes past the end"; then
-              echo "::error::patchelf left a corrupted dynamic string table in '$f' — DT_STRSZ points past end-of-file. See llvm-readelf output below."
-              echo "$READELF_OUT"
-              exit 1
-            fi
-            if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
-              echo "::error::'$f' has neither DT_HASH nor DT_GNU_HASH after patchelf — this will fail to load on-device with 'CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH'."
-              echo "$READELF_OUT"
-              exit 1
-            fi
-          done
-          echo "patchelf output verified clean for node and $LIB (hash table intact, string table within bounds)."
+          READELF_OUT="$("$TC/bin/llvm-readelf" -d node 2>&1)"
+          if echo "$READELF_OUT" | grep -qi "goes past the end"; then
+            echo "::error::patchelf left a corrupted dynamic string table in 'node' — DT_STRSZ points past end-of-file. See llvm-readelf output below."
+            echo "$READELF_OUT"
+            exit 1
+          fi
+          if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
+            echo "::error::'node' has neither DT_HASH nor DT_GNU_HASH after patchelf — this will fail to load on-device with 'CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH'."
+            echo "$READELF_OUT"
+            exit 1
+          fi
+          echo "patchelf output verified clean for node (hash table intact, string table within bounds)."
 
           # Sanity check: surface any *other* unexpected external dependency
           # here in CI rather than discovering it later on a real device.
           # libc/libm/libdl/liblog are always provided by the Android
           # platform itself and are expected; everything else listed below
           # should already be either statically linked or bundled in this
-          # tar.gz (libc++_shared.so, and $LIB itself).
-          echo "---- Remaining NEEDED entries (expect only platform libs + $LIB + libc++_shared.so) ----"
-          "$TC/bin/llvm-readelf" -d node "$LIB" | grep NEEDED
+          # tar.gz (libc++_shared.so).
+          echo "---- Remaining NEEDED entries (expect only platform libs + libc++_shared.so) ----"
+          "$TC/bin/llvm-readelf" -d node | grep NEEDED
 
-          # ---- Enforce single-lib goal: only bundle libc++_shared.so if it's
+          # ---- Enforce single-file goal: only bundle libc++_shared.so if it's
           # ---- actually still load-bearing. -static-libstdc++ (set in
-          # ---- CXXFLAGS/LDFLAGS above) is supposed to make both 'node' and
-          # ---- $LIB fully static w.r.t. libc++, but whether it actually took
-          # ---- effect depends on gyp propagating LDFLAGS.target through both
-          # ---- link steps, which isn't guaranteed across every Node ref/gyp
+          # ---- CXXFLAGS/LDFLAGS earlier in this workflow) is supposed to make
+          # ---- node fully static w.r.t. libc++, but whether it actually took
+          # ---- effect depends on gyp propagating LDFLAGS.target through the
+          # ---- link step, which isn't guaranteed across every Node ref/gyp
           # ---- version (see comment above the cp of libc++_shared.so). This
           # ---- was previously an echo-only check — a silent regression here
           # ---- would just mean libc++_shared.so quietly stays load-bearing
           # ---- forever with no signal. Now it's asserted: if NEEDED is clean,
           # ---- drop libc++_shared.so from the tar.gz entirely.
-          if "$TC/bin/llvm-readelf" -d node "$LIB" | grep -q 'NEEDED.*libc++_shared'; then
+          if "$TC/bin/llvm-readelf" -d node | grep -q 'NEEDED.*libc++_shared'; then
             echo "::warning::libc++_shared.so is still a real runtime dependency — -static-libstdc++ did not fully take effect this build. Keeping it bundled."
             BUNDLE_LIBCXX=1
           else
-            echo "libc++ is fully static in both node and $LIB — libc++_shared.so is no longer needed."
+            echo "libc++ is fully static in node — libc++_shared.so is no longer needed."
             BUNDLE_LIBCXX=0
           fi
 
           if [ "$BUNDLE_LIBCXX" = "1" ]; then
-            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node libc++_shared.so
-            ls -lh "$LIB" node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node libc++_shared.so
+            ls -lh node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
           else
-            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" "$LIB" node
-            ls -lh "$LIB" node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+            tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
+            ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
           fi
 
       # ---------- 5b. Package Node.js headers (native addon builds) ----------
@@ -1217,7 +1211,7 @@ jobs:
             | | |
             |---|---|
             | Node.js ref | `${{ env.NODE_REF }}` |
-            | Library name | `lib${{ env.LIB_NAME }}.so` |
+            | Artifact label | `${{ env.LIB_NAME }}` |
             | Build profile | `${{ inputs.profile || 'balanced' }}` |
             | NDK version | `${{ env.NDK_VERSION }}` |
             | Trigger | `${{ github.event_name }}` |
@@ -1225,6 +1219,10 @@ jobs:
 
             arm64-v8a is always included when the build succeeds; armeabi-v7a
             is experimental and only present below if that leg also succeeded.
+            Binary inside each tar.gz is named `node` (single ELF, PIE, all
+            symbols exported via -rdynamic/--export-dynamic) — rename it to
+            lib*.so yourself downstream if your app needs Android to extract
+            it with exec permissions.
 
             Each ABI also ships a `*-headers.zip` (Node.js includes +
             `config.gypi`) for compiling native N-API addons against that
