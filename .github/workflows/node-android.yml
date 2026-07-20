@@ -63,7 +63,30 @@ env:
 jobs:
   build:
     name: android-${{ matrix.abi }}
-    runs-on: ubuntu-22.04
+    # UPDATED 2026-07-20: bumped from ubuntu-22.04. V8's current C++20 usage
+    # now requires GCC 13.2+ — nodejs/node#62555 states this explicitly
+    # ("V8 can no longer be compiled with GCC 12"). ubuntu-22.04's default
+    # g++ is 11.4, which is exactly what CC_host/CXX_host below resolve to,
+    # so this was silently broken rather than merely outdated. Confirmed on
+    # two independent V8 files/symbols so far: the Turboshaft CRTP patch
+    # target (builtins-number-tsa.cc / AssemblerOpInterface) further down in
+    # this file, and — verified directly, not assumed — the
+    # "value of 'kArmv6' is not usable in a constant expression" /
+    # "was not declared 'constexpr'" failure in
+    # codegen/arm/assembler-arm.cc on the armeabi-v7a host-tools leg
+    # (obj.host/v8_base_without_compiler; mksnapshot needs a host-built copy
+    # of the target arch's Assembler). Reproduced that exact pattern
+    # (constexpr fn reading a non-constexpr static-const class-type global)
+    # against g++-11/-12/-13 directly: 11 and 12 both hard-error on the bare
+    # declaration regardless of whether it's ever actually const-evaluated;
+    # 13 demotes it to a non-fatal -Winvalid-constexpr warning, which is
+    # sufficient here since V8 only calls CpuFeaturesFromCompiler() at plain
+    # runtime (CpuFeatures::ProbeImpl), never in a forced constant-expression
+    # context. ubuntu-24.04 ships GCC 13.2 as default gcc/g++, so
+    # CC_host/CXX_host and the CC.host/CXX.host/LINK.host make overrides
+    # need no other changes, and gcc-multilib/g++-multilib for the
+    # armeabi-v7a leg exist on 24.04 too.
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
     # x64 hosts has open bugs (nodejs/node#58975). Never let it block arm64.
@@ -162,10 +185,14 @@ jobs:
       # symbol table happened not to trigger it. On-device this surfaces as
       # "CANNOT LINK EXECUTABLE ... empty/missing DT_HASH/DT_GNU_HASH (new
       # hash type from the future?)", and the build step itself doesn't
-      # error, so it ships silently. This job runs on ubuntu-22.04 (an older
-      # apt patchelf than the 24.04 case above), so the exact bug isn't
-      # confirmed present here — but there's no reason to trust an even
-      # older apt package more, so pin to upstream's actual latest tagged
+      # error, so it ships silently. UPDATED 2026-07-20: this job itself now
+      # runs on ubuntu-24.04 (see the runs-on bump near the job header,
+      # forced by V8's GCC 13.2 floor — nodejs/node#62555), so the
+      # reproduced 24.04 apt-patchelf DT_STRSZ bug described above is now
+      # directly in scope for this job's own apt install, not just the
+      # separate v24-only reference build this comment originally compared
+      # against. That makes pinning upstream here more clearly load-bearing
+      # than before, not less — pin to upstream's actual latest tagged
       # release instead of whatever apt happens to carry. Resolve the
       # /releases/latest redirect rather than hardcoding a version, so this
       # self-heals as NixOS/patchelf ships further fixes, and fail loudly if
