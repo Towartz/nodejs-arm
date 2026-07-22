@@ -557,6 +557,24 @@ jobs:
             size)  EXTRA_FLAGS="--v8-lite-mode" ;;
           esac
 
+          # ---- Crypto perf: use OpenSSL's asm-optimized routines where safe ----
+          # A bare --openssl-no-asm forces pure-C crypto (AES/SHA/ECC) on
+          # every leg — a real runtime cost for exactly this build's target
+          # workload (AuroraChat / Baileys-style E2E crypto: AES-GCM,
+          # Curve25519, HMAC-SHA256 all run through these routines
+          # constantly). OpenSSL's asm paths do their own runtime CPU-feature
+          # check (getauxval/AT_HWCAP) before dispatching, so enabling them
+          # is safe — it can't crash on a device lacking crypto extensions,
+          # it just falls back to the same C path at runtime. Enabled only
+          # on arm64-v8a (the verified leg); left disabled on armeabi-v7a,
+          # since that ABI's cross-compile is already the flakier one
+          # (continue-on-error, nodejs/node#58975) and this hasn't been
+          # separately verified there.
+          OPENSSL_ASM_FLAG="--openssl-no-asm"
+          if [ "${{ matrix.dest_cpu }}" = "arm64" ]; then
+            OPENSSL_ASM_FLAG=""
+          fi
+
           NODEEXTRA=""
           if ./configure --help 2>&1 | grep -q without-corepack; then
             NODEEXTRA="--without-corepack"
@@ -569,7 +587,7 @@ jobs:
             --with-intl=none \
             --without-npm \
             $NODEEXTRA \
-            --openssl-no-asm \
+            $OPENSSL_ASM_FLAG \
             $EXTRA_FLAGS
 
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
@@ -712,11 +730,6 @@ jobs:
           find "$HDR_DIR" -maxdepth 1 -name "*.h" | wc -l
           grep -E "target_arch|byteorder" "$HDR_DIR/config.gypi"
 
-          cd node-headers
-          zip -rq "../../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip" include
-          cd ..
-          ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
-
       # ---------- 6a. Upload artifact ----------
       # Raw files, no tar.gz: actions/upload-artifact already zips whatever
       # you give it, so pre-archiving here just produced a zip-of-a-tar.gz
@@ -734,12 +747,17 @@ jobs:
           retention-days: 14
 
       # ---------- 6b. Upload headers artifact ----------
+      # Raw folder, no manual zip — same reasoning as 6a: upload-artifact
+      # already archives whatever it's given, so pre-zipping here would
+      # double-pack it (a zip inside the zip a UI download produces). The
+      # release job zips this into a real .zip once, for actual
+      # distribution — see "Assemble release archives" below.
       - name: Upload headers artifact
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
-          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers.zip
+          path: node/node-headers/include
           retention-days: 14
 
   # ---------- Release ----------
@@ -789,11 +807,10 @@ jobs:
       - name: List downloaded artifacts
         run: ls -lhR dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
 
-      # This is the only place a node/libc++_shared.so pair gets archived
-      # into a single file — once, here, for actual distribution. The build
-      # job intentionally uploads raw files (see step 6a) instead of
-      # pre-archiving, to avoid a zip-of-a-tar.gz on the Actions-artifact
-      # download path; this step is where a real per-ABI tar.gz belongs.
+      # This is the only place any archive gets made for actual distribution
+      # — once, here. The build job intentionally uploads raw files/folders
+      # (steps 6a/6b) instead of pre-archiving, to avoid a zip-of-a-zip (or
+      # zip-of-a-tar.gz) on the Actions-artifact download path.
       - name: Assemble release archives
         run: |
           mkdir -p release-assets
@@ -801,8 +818,7 @@ jobs:
           for d in dist/*/; do
             name="$(basename "$d")"
             if [[ "$name" == *-headers ]]; then
-              # Headers artifact already contains one pre-named zip file — pass it through as-is.
-              cp "$d"*.zip release-assets/
+              ( cd "$d" && zip -rq "$GITHUB_WORKSPACE/release-assets/${name}.zip" . )
             else
               ( cd "$d" && tar czf "$GITHUB_WORKSPACE/release-assets/${name}.tar.gz" * )
             fi
