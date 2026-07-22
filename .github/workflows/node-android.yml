@@ -1217,7 +1217,11 @@ jobs:
       #
       # Layout include/node/*.h follows the official node-vX.Y.Z-headers.tar.gz
       # structure from nodejs.org — this is what node-gyp/node-addon-api reads
-      # via `npm config set nodedir=...` when compiling native modules.
+      # via `npm config set nodedir=...` when compiling native modules. Full
+      # set: Node's own public headers, all of V8's + libuv's includes, plus
+      # the bundled OpenSSL and zlib headers (both statically bundled by
+      # default, so addons touching crypto or compression need these too) —
+      # matching everything the official headers tarball ships.
       - name: Package Node.js headers (${{ matrix.abi }})
         if: success()
         working-directory: node
@@ -1231,8 +1235,33 @@ jobs:
           cp -r deps/v8/include/. "$HDR_DIR/"
           cp -r deps/uv/include/. "$HDR_DIR/"
 
+          # ---- Bundled OpenSSL headers ----
+          # Node statically bundles its own OpenSSL (node_shared_openssl=false
+          # by default; --openssl-no-asm above only disables asm codegen, it
+          # doesn't switch to a system OpenSSL) — native addons that touch
+          # crypto need these to compile against the exact bundled version,
+          # same as the official node-vX.Y.Z-headers.tar.gz ships them.
+          if [ -d deps/openssl/openssl/include/openssl ]; then
+            mkdir -p "$HDR_DIR/openssl"
+            cp -r deps/openssl/openssl/include/openssl/. "$HDR_DIR/openssl/"
+            cp -r deps/openssl/config/. "$HDR_DIR/openssl/"
+          else
+            echo "::error::deps/openssl/openssl/include/openssl not found — expected for a node_shared_openssl=false build"
+            exit 1
+          fi
+
+          # ---- Bundled zlib headers ----
+          # Same reasoning: node_shared_zlib=false by default, so addons doing
+          # compression against Node's bundled zlib need these two headers.
+          if [ -f deps/zlib/zlib.h ]; then
+            cp deps/zlib/zconf.h deps/zlib/zlib.h "$HDR_DIR/"
+          else
+            echo "::error::deps/zlib/zlib.h not found — expected for a node_shared_zlib=false build"
+            exit 1
+          fi
+
           echo "---- Header contents per ABI (${{ matrix.abi }}) ----"
-          find "$HDR_DIR" -maxdepth 1 -name "*.h" | wc -l
+          find "$HDR_DIR" -name "*.h" | wc -l
           grep -E "target_arch|byteorder" "$HDR_DIR/config.gypi"
 
           cd node-headers
@@ -1370,8 +1399,9 @@ jobs:
               `node` itself does NOT depend on it — it remains fully
               static/standalone.
 
-            Each ABI also ships a `*-headers.zip` (Node.js includes +
-            `config.gypi`) for compiling native N-API addons against that
-            specific build. Use the headers matching the target ABI —
-            `config.gypi` differs between arm64-v8a and armeabi-v7a.
+            Each ABI also ships a `*-headers.zip` — Node's public headers,
+            all of V8's and libuv's includes, the bundled OpenSSL and zlib
+            headers, and `config.gypi` — for compiling native N-API addons
+            against that specific build. Use the headers matching the target
+            ABI — `config.gypi` differs between arm64-v8a and armeabi-v7a.
           files: dist/*
