@@ -1,15 +1,17 @@
 <div align="center">
 
-# Node.js for Android ARM — **v24.x LTS**
+# Node.js for Android ARM — **v26.x**
 
-[![Build](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=v24.x-lts&label=build&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github&color=success)](https://github.com/Towartz/nodejs-arm/actions)
+[![Last build](https://img.shields.io/badge/last%20build-%23136%20(Jul%2022)-success)](https://github.com/Towartz/nodejs-arm/actions/runs/29906238656)
+[![Latest release](https://img.shields.io/badge/latest%20release-v26.x--run132-blue?logo=github)](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run132)
 [![NDK](https://img.shields.io/badge/NDK-r29(Clang%2019)-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
-[![Node](https://img.shields.io/badge/Node-v24.x(LTS)-339933?logo=nodedotjs)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-v26.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 [![Views](https://hits.sh/github.com/Towartz/nodejs-arm.svg?label=views&color=555)](https://hits.sh/github.com/Towartz/nodejs-arm/)
 
-**v24.x LTS** — **✅ Verified** — Cross-compiled standalone static `node` CLI for Android ARM64 / ARM32 via GitHub Actions.
+**v26.x** — **✅ CI passing** — Cross-compiled standalone static `node` CLI for Android ARM64 / ARM32 via GitHub Actions.
 
 Statically linked against libc++ (zero external dependencies), bundled with `libc++_shared.so` for native N-API addon builds and `*-headers.zip` per ABI for compiling addons against the exact build config.
 
@@ -22,9 +24,11 @@ Statically linked against libc++ (zero external dependencies), bundled with `lib
 | ABI | Balanced (JIT + `-O3`) | Speed (LTO) | Size (V8 lite-mode) |
 |-----|------------------------|-------------|---------------------|
 | `arm64-v8a` | ✅ Verified | ✅ Verified | ✅ Verified |
-| `armeabi-v7a` | ⚠️ Experimental | ⚠️ Experimental | ⚠️ Experimental |
+| `armeabi-v7a` | ✅ Included* | ⚠️ Experimental | ⚠️ Experimental |
 
-> `armeabi-v7a`: experimental — V8 cross-build bugs ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975))
+> *`armeabi-v7a` balanced builds succeed but are still considered **experimental** upstream ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975)).
+
+> `armeabi-v7a` speed/size profiles: experimental — V8 cross-build bugs ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975))
 
 ---
 
@@ -32,10 +36,9 @@ Statically linked against libc++ (zero external dependencies), bundled with `lib
 
 | # | Date | Branch | Event | ABI | Release |
 |---|------|--------|-------|-----|---------|
-| 117 | 2026-07-20 | `v24.x-lts` | `push` | `arm64-v8a` | [`node-android-v24.x--run117`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run117) |
-| 114 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`node-android-v24.x--run114`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run114) |
-| 108 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`node-android-v24.x--run108`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run108) |
-| 107 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`aurora_node-android-v24.x--run107`](https://github.com/Towartz/nodejs-arm/releases/tag/aurora_node-android-v24.x--run107) |
+| 132 | 2026-07-22 | `main` | `push` | `arm64-v8a` + `armeabi-v7a` | [`node-android-v26.x--run132`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run132) |
+| 130 | 2026-07-22 | `main` | `push` | `arm64-v8a` | [`node-android-v26.x--run130`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run130) |
+| 128 | 2026-07-20 | `main` | `push` | `arm64-v8a` | [Actions run #29729197643](https://github.com/Towartz/nodejs-arm/actions/runs/29729197643) |
 
 ---
 
@@ -67,11 +70,27 @@ Set `lib_name` workflow input to `aurora` → produces `aurora-android-<abi>` wi
 
 ---
 
+## Recent activity
+
+| Date | Commit | Message |
+|------|--------|---------|
+| 2026-07-22 | [`9f784a5`](https://github.com/Towartz/nodejs-arm/commit/9f784a5) | Fix OpenSSL asm target selection for Android builds |
+| 2026-07-22 | [`e334d87`](https://github.com/Towartz/nodejs-arm/commit/e334d87) | Refactor OpenSSL ASM flag handling in workflow |
+| 2026-07-22 | [`fbc53e0`](https://github.com/Towartz/nodejs-arm/commit/fbc53e0) | Configure OpenSSL asm optimizations for arm64 |
+| 2026-07-22 | [`646dc2f`](https://github.com/Towartz/nodejs-arm/commit/646dc2f) | Refactor Node.js headers packaging in workflow |
+| 2026-07-22 | [`bf1a1d5`](https://github.com/Towartz/nodejs-arm/commit/bf1a1d5) | Clarify bundled OpenSSL and zlib headers usage |
+| 2026-07-22 | [`e99d2c4`](https://github.com/Towartz/nodejs-arm/commit/e99d2c4) | Refactor Node.js build workflow by removing patchelf |
+| 2026-07-22 | [`0a9e876`](https://github.com/Towartz/nodejs-arm/commit/0a9e876) | Upgrade Android NDK to r29 and update patches |
+| 2026-07-22 | [`5c5e671`](https://github.com/Towartz/nodejs-arm/commit/5c5e671) | Update Android build workflow for Ubuntu 24.04 |
+| 2026-07-21 | [`8b41e86`](https://github.com/Towartz/nodejs-arm/commit/8b41e86) | Refactor Node.js packaging for static binary |
+
+---
+
 ## Toolchain
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| NDK | `r29` | Clang 19 — tracking latest stable |
+| NDK | `r29` | Clang 19 — last known-good NDK for v26.x CRTP patterns |
 | Host | `ubuntu-24.04` | Pinned for toolchain ABI stability |
 | Target API | `android-24` | Minimum API 24 (Android 7.0+) |
 
@@ -100,7 +119,7 @@ Patches cover: V8 stack tracing, trap handler, zlib cpu_features, `std::atomic_r
 
 Trigger a build via **Actions** → **Node.js for Android (ARM)** → **Run workflow**.
 
-On `push` to `v24.x-lts`, builds run automatically. Artifacts are promoted to a **GitHub Release** with a `node-android-*` tag.
+On `push` to `main` or `v24.x-lts`, builds run automatically. Artifacts are promoted to a **GitHub Release** with a `node-android-*` tag.
 
 ---
 
