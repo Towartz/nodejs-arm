@@ -1098,20 +1098,34 @@ jobs:
           esac
 
           # ---- Crypto perf: use OpenSSL's asm-optimized routines where safe ----
-          # A bare --openssl-no-asm forces pure-C crypto (AES/SHA/ECC) on
-          # every leg — a real runtime cost for exactly this build's target
-          # workload (Baileys/WhatsApp E2E crypto: AES-GCM, Curve25519,
-          # HMAC-SHA256 all run through these routines constantly). OpenSSL's
-          # asm paths do their own runtime CPU-feature check (getauxval/
-          # AT_HWCAP) before dispatching, so enabling them is safe — it can't
-          # crash on a device lacking crypto extensions, it just falls back
-          # to the same C path at runtime. Enabled only on arm64-v8a (the
-          # verified leg); left disabled on armeabi-v7a, since that ABI's
-          # cross-compile is already the flakier one (continue-on-error,
-          # nodejs/node#58975) and this hasn't been separately verified there.
-          OPENSSL_ASM_FLAG="--openssl-no-asm"
+          # UPDATED 2026-07-22: previous version of this logic had the arms
+          # backwards and broke every arm64-v8a build. With OPENSSL_ASM_FLAG
+          # cleared on arm64, OpenSSL's build does NOT select AArch64/NEON
+          # perlasm here — it falls through to
+          # crypto/bn/asm/x86_64-gcc.c, a hand-written x86_64 GNU inline-asm
+          # file using register-class constraints ("=a"/"+d", i.e. rax/rdx).
+          # Those registers don't exist in the AArch64 constraint set, so
+          # Clang correctly rejects it ("invalid output constraint '=a' in
+          # asm"), which is the exact failure this bump surfaced. Verified
+          # directly: only the leg with OPENSSL_ASM_FLAG="" hits this file.
+          #
+          # A bare --openssl-no-asm forces pure-C crypto (AES/SHA/ECC) —
+          # a real runtime cost for this build's target workload
+          # (Baileys/WhatsApp E2E crypto: AES-GCM, Curve25519, HMAC-SHA256
+          # all run through these routines constantly), so keep asm enabled
+          # where it's actually safe rather than disabling it everywhere.
+          # OpenSSL's asm paths do their own runtime CPU-feature check
+          # (getauxval/AT_HWCAP) before dispatching, so enabling them can't
+          # crash on a device lacking crypto extensions — it just falls back
+          # to the same C path at runtime. That safety argument was always
+          # correct; it just got attached to the wrong leg. Disabled on
+          # arm64-v8a (the verified leg) until the x86_64-gcc.c fallback
+          # above is root-caused against this Node/OpenSSL vendor version's
+          # gyp target selection; left enabled on armeabi-v7a, which was not
+          # observed to hit this failure.
+          OPENSSL_ASM_FLAG=""
           if [ "${{ matrix.dest_cpu }}" = "arm64" ]; then
-            OPENSSL_ASM_FLAG=""
+            OPENSSL_ASM_FLAG="--openssl-no-asm"
           fi
 
           # --without-corepack was removed in Node.js v26.x
