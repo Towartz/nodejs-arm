@@ -1097,6 +1097,23 @@ jobs:
             size)  EXTRA_FLAGS="--v8-lite-mode" ;;
           esac
 
+          # ---- Crypto perf: use OpenSSL's asm-optimized routines where safe ----
+          # A bare --openssl-no-asm forces pure-C crypto (AES/SHA/ECC) on
+          # every leg — a real runtime cost for exactly this build's target
+          # workload (Baileys/WhatsApp E2E crypto: AES-GCM, Curve25519,
+          # HMAC-SHA256 all run through these routines constantly). OpenSSL's
+          # asm paths do their own runtime CPU-feature check (getauxval/
+          # AT_HWCAP) before dispatching, so enabling them is safe — it can't
+          # crash on a device lacking crypto extensions, it just falls back
+          # to the same C path at runtime. Enabled only on arm64-v8a (the
+          # verified leg); left disabled on armeabi-v7a, since that ABI's
+          # cross-compile is already the flakier one (continue-on-error,
+          # nodejs/node#58975) and this hasn't been separately verified there.
+          OPENSSL_ASM_FLAG="--openssl-no-asm"
+          if [ "${{ matrix.dest_cpu }}" = "arm64" ]; then
+            OPENSSL_ASM_FLAG=""
+          fi
+
           # --without-corepack was removed in Node.js v26.x
           NODEEXTRA=""
           if ./configure --help 2>&1 | grep -q without-corepack; then
@@ -1110,7 +1127,7 @@ jobs:
             --with-intl=none \
             --without-npm \
             $NODEEXTRA \
-            --openssl-no-asm \
+            $OPENSSL_ASM_FLAG \
             $EXTRA_FLAGS
 
           # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
