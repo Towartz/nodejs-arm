@@ -7,12 +7,15 @@
 # AuroraNodeBridgePlugin spawns the `node` binary as a raw subprocess
 # (ProcessBuilder), renamed to jniLibs/arm64-v8a/libaurora_node.so purely so
 # Android's APK installer extracts it with executable permissions — it is
-# NOT loaded via System.loadLibrary()/dlopen. This matters for packaging
-# (see the libc++_shared.so + $ORIGIN rpath step below): a raw-exec'd child
-# process does not automatically inherit the app's nativeLibraryDir search
-# path the way a dlopen'd library would, so every runtime dependency of
-# `node` must either be statically linked or discoverable via an rpath
-# baked into the binary itself.
+# NOT loaded via System.loadLibrary()/dlopen. This matters for packaging: a
+# raw-exec'd child process does not automatically inherit the app's
+# nativeLibraryDir search path the way a dlopen'd library would, so every
+# runtime dependency of `node` must either be statically linked (the case
+# today — see the HARD CHECK in the packaging step) or discoverable via an
+# rpath baked into the binary itself (the commented Option 2 fallback,
+# further below, for if static linking ever breaks). libc++_shared.so is
+# still shipped alongside node in the release archive, but only as a plain
+# copy for native N-API addons to dlopen — not something node itself needs.
 name: Node.js for Android (ARM)
 
 on:
@@ -61,13 +64,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # r27d supersedes r27c within the same LTS line (bugfix-only bump, not a track
-  # change) — verified against developer.android.com/ndk/downloads on 2026-07-18,
-  # where r27d is listed as "Latest LTS Version". r29 is the current non-LTS
-  # "Latest Stable"; r30 (beta1 as of this check) will be the *next* LTS. Staying on
-  # the LTS point release here rather than jumping to r29/r30 to match this
-  # workflow's existing LTS-track choice — bump deliberately, not by drive-by.
-  NDK_VERSION: 'r27d'
+  # Bumped off the r27d LTS line to r29 (released 2025-10-06) — verified against
+  # github.com/android/ndk/releases and developer.android.com/ndk/downloads on
+  # 2026-07-22, where r29 is "Latest" / the current stable, non-LTS release.
+  # r27 remains the LTS track and stays supported until r30 (currently beta2)
+  # ships as the next LTS, but this workflow is deliberately tracking latest
+  # stable rather than LTS now — bump again when r30 goes stable if you want
+  # to move back onto the LTS line.
+  NDK_VERSION: 'r29'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -628,17 +632,36 @@ jobs:
             exit 1
           fi
 
-          # Package ONLY the single binary. Nothing else.
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
-          ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          # ---- Bundle libc++_shared.so alongside node (NOT linked into it) ----
+          # node itself stays fully static (the HARD CHECK above already proves
+          # it has no NEEDED libc++_shared.so entry) — this copy exists purely
+          # for downstream native N-API addons that dlopen libc++_shared.so at
+          # runtime and expect to find it next to the host binary. No patchelf,
+          # no rpath: node does not load this file itself.
+          case "${{ matrix.dest_cpu }}" in
+            arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
+            *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
+          esac
+          cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
+          ls -lh node libc++_shared.so
+
+          # No tar/zip here — upload-artifact (step 6a) zips these raw files
+          # itself. Archiving them first meant downloading the CI artifact
+          # gave you a zip containing a tar.gz containing node: double
+          # packing for no reason. Raw files -> exactly one zip layer.
+          # The release job (below) is what actually needs a distributable
+          # single-file archive per ABI, and packs one there, once.
 
           # ============================================================
           # OPTION 2 — COMMENTED FALLBACK (do NOT delete)
           # ------------------------------------------------------------
           # If a future Node ref breaks -static-libstdc++ propagation through
-          # gyp and you need to ship libc++_shared.so again, comment out the
-          # 15 lines above (from "cp out/Release/node node" through the tar
-          # command) and uncomment the block below instead.
+          # gyp and node ends up NEEDING libc++_shared.so at runtime (not just
+          # shipping it as a courtesy copy for addons), comment out the block
+          # above (from "cp out/Release/node node" down to the "ls -lh node
+          # libc++_shared.so" line) and uncomment the patchelf/rpath block
+          # below instead — this one bakes an $ORIGIN rpath so node itself
+          # can find and dlopen libc++_shared.so.
           # ------------------------------------------------------------
           # cp out/Release/node node
           # "$TC/bin/llvm-strip" --strip-all node
@@ -695,12 +718,19 @@ jobs:
           ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
 
       # ---------- 6a. Upload artifact ----------
+      # Raw files, no tar.gz: actions/upload-artifact already zips whatever
+      # you give it, so pre-archiving here just produced a zip-of-a-tar.gz
+      # for anyone downloading from the Actions UI. node and libc++_shared.so
+      # live at node/node and node/libc++_shared.so (working-directory: node
+      # was used two steps up), relative to the repo root this step runs in.
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
-          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          path: |
+            node/node
+            node/libc++_shared.so
           retention-days: 14
 
       # ---------- 6b. Upload headers artifact ----------
@@ -743,16 +773,41 @@ jobs:
             echo "RELEASE_TAG=${NAME}-android-${SAFE_REF}-run${{ github.run_number }}" >> "$GITHUB_ENV"
           fi
 
+      # merge-multiple: false (the default) on purpose here — arm64-v8a and
+      # armeabi-v7a both upload a file literally named `node` (and, now,
+      # `libc++_shared.so`). Merging would flatten both ABIs into one dist/
+      # dir and one would silently clobber the other. Keeping per-artifact
+      # subdirectories (dist/<artifact-name>/...) is what lets the next step
+      # tell them apart.
       - name: Download all ABI artifacts
         uses: actions/download-artifact@v6
         with:
           pattern: ${{ env.LIB_NAME }}-android-*
           path: dist
-          merge-multiple: true
           if-no-artifact-found: warn
 
       - name: List downloaded artifacts
-        run: ls -lh dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
+        run: ls -lhR dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
+
+      # This is the only place a node/libc++_shared.so pair gets archived
+      # into a single file — once, here, for actual distribution. The build
+      # job intentionally uploads raw files (see step 6a) instead of
+      # pre-archiving, to avoid a zip-of-a-tar.gz on the Actions-artifact
+      # download path; this step is where a real per-ABI tar.gz belongs.
+      - name: Assemble release archives
+        run: |
+          mkdir -p release-assets
+          shopt -s nullglob
+          for d in dist/*/; do
+            name="$(basename "$d")"
+            if [[ "$name" == *-headers ]]; then
+              # Headers artifact already contains one pre-named zip file — pass it through as-is.
+              cp "$d"*.zip release-assets/
+            else
+              ( cd "$d" && tar czf "$GITHUB_WORKSPACE/release-assets/${name}.tar.gz" * )
+            fi
+          done
+          ls -lh release-assets || echo "::warning::release-assets is empty — did every matrix leg fail?"
 
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v3
@@ -775,13 +830,16 @@ jobs:
 
             arm64-v8a is always included when the build succeeds; armeabi-v7a
             is experimental and only present below if that leg also succeeded.
-            Binary inside each tar.gz is named `node` (single ELF, PIE, all
-            symbols exported via -rdynamic/--export-dynamic) — rename it to
-            lib*.so yourself downstream if your app needs Android to extract
-            it with exec permissions.
+            Each ABI's tar.gz contains two files:
+            - `node` — single ELF, PIE, fully static (no NEEDED libc++_shared.so),
+              all symbols exported via -rdynamic/--export-dynamic. Rename it to
+              lib*.so yourself downstream if your app needs Android to extract
+              it with exec permissions.
+            - `libc++_shared.so` — bundled alongside for native N-API addons
+              that dlopen it at runtime. node itself does not load this file.
 
             Each ABI also ships a `*-headers.zip` (Node.js includes +
             `config.gypi`) for compiling native N-API addons against that
             specific build. Use the headers matching the target ABI —
             `config.gypi` differs between arm64-v8a and armeabi-v7a.
-          files: dist/*
+          files: release-assets/*
