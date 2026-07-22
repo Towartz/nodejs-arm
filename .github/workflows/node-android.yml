@@ -1016,6 +1016,117 @@ jobs:
           echo "    swap /data/local/tmp for @TERMUX_PREFIX@/tmp placeholder."
           echo "  - deps-uv-src-unix-process.c.patch: strips post-fork privilege-drop calls."
 
+      # ---------- 3c. Patch OpenSSL asm target selection for Android ----------
+      # Root cause of "invalid output constraint '=a'/'+d' in asm" in
+      # deps/openssl/openssl/crypto/bn/asm/x86_64-gcc.c, on BOTH arm64-v8a
+      # and armeabi-v7a, on both v24.x and v26.x — confirmed by generating
+      # openssl.target.mk directly via configure.py with this build's real
+      # GYP_DEFINES (OS=android, target_arch=arm64 and target_arch=arm) and
+      # diffing against the same run with target_arch=arm64/OS=linux:
+      #
+      # deps/openssl/openssl_asm.gypi selects which arch-specific asm gypi
+      # gets included via a single and/or condition chain. Its
+      # target_arch=="arm" branch requires OS=="linux" exactly; its
+      # target_arch=="arm64" branch requires OS in "linux openharmony".
+      # Neither matches OS=="android" (this build's --dest-os), so BOTH
+      # ARM legs fall through every named branch to the file's final,
+      # unconditional catchall — commented "Other architectures don't use
+      # assembly" but which actually includes
+      # config/archs/linux-x86_64/asm/openssl.gypi, i.e. real x86_64 GNU
+      # inline assembly using register-class constraints ("=a"/"+d" ->
+      # rax/rdx) that don't exist on any ARM target. This is why the
+      # failure reproduced identically regardless of which leg had
+      # --openssl-no-asm passed or not (see the removed flag-inversion
+      # workaround in the Cross-compile step's history): the flag only
+      # controls whether openssl_asm.gypi's conditions run at all
+      # (openssl_no_asm==1 skips the whole file per openssl.gyp); it
+      # can't change what a given condition resolves to once evaluated,
+      # and both legs were resolving to the same wrong branch.
+      #
+      # Fix: add OS=="android" to the arm and arm64 branches, ahead of the
+      # x86_64 catchall, so Android cross-builds pull the real
+      # linux-armv4/linux-aarch64 perlasm gypi files instead (these are
+      # genuine GNU-as .S files targeting the correct ISA — AArch64/ARMv4
+      # NEON and crypto-extension asm — not x86 inline asm, so there's no
+      # register-constraint mismatch risk of the kind that broke here).
+      # Verified directly: after this patch, the same configure.py
+      # invocations that previously produced 1x x86_64-gcc.c reference and
+      # 0x aarch64/armv4 references now produce 0x x86_64-gcc.c and
+      # 42x/35x aarch64/armv4 references respectively, for arm64 and arm.
+      #
+      # Also corrects the catchall's comment, which claims "don't use
+      # assembly" while doing the opposite — actively including x86_64
+      # assembly. Left the catchall itself untouched (still needed for
+      # whatever legitimately-asm-less combinations rely on it; not
+      # auditing those here) beyond that comment fix.
+      - name: "Patch OpenSSL: asm target selection for Android (arm/arm64)"
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib
+
+          gypi = pathlib.Path('deps/openssl/openssl_asm.gypi')
+          if not gypi.exists():
+              print("::warning::deps/openssl/openssl_asm.gypi not found")
+          else:
+              s = gypi.read_text()
+
+              arm_old = 'target_arch=="arm" and OS=="linux"'
+              arm_new = 'target_arch=="arm" and OS in "linux android"'
+              if arm_old in s:
+                  s = s.replace(arm_old, arm_new, 1)
+                  print(f"patched {gypi} (arm branch)")
+              else:
+                  print(f"::warning::arm branch text not found in {gypi}")
+
+              arm64_old = 'target_arch=="arm64" and OS in "linux openharmony"'
+              arm64_new = 'target_arch=="arm64" and OS in "linux openharmony android"'
+              if arm64_old in s:
+                  s = s.replace(arm64_old, arm64_new, 1)
+                  print(f"patched {gypi} (arm64 branch)")
+              else:
+                  print(f"::warning::arm64 branch text not found in {gypi}")
+
+              # Fix the misleading catchall comment (cosmetic, but this
+              # comment directly caused confusion during triage — leaving
+              # it wrong would mislead the next person too).
+              old_comment = "      # Other architectures don't use assembly\n"
+              new_comment = (
+                  "      # NOTE: despite this comment, this branch actually\n"
+                  "      # includes x86_64 GNU inline-asm (linux-x86_64/asm/\n"
+                  "      # openssl.gypi), unconditionally, for any\n"
+                  "      # target_arch/OS combination not matched above. If a\n"
+                  "      # non-x86_64 target hits 'invalid output constraint\n"
+                  "      # ...in asm' in x86_64-gcc.c, add that target's OS to\n"
+                  "      # the correct arch-specific branch above instead of\n"
+                  "      # touching this fallback.\n"
+              )
+              if old_comment in s:
+                  s = s.replace(old_comment, new_comment, 1)
+                  print(f"patched {gypi} (catchall comment)")
+              else:
+                  print("::warning::catchall comment text not found (already patched or upstream reworded it)")
+
+              gypi.write_text(s)
+
+              # ----- Post-patch sanity checks -----
+              s = gypi.read_text()
+              errors = []
+              if 'OS in "linux android"' not in s:
+                  errors.append("arm branch: expected replacement text missing")
+              if 'OS in "linux openharmony android"' not in s:
+                  errors.append("arm64 branch: expected replacement text missing")
+              if 'target_arch=="arm" and OS=="linux"\'' in s:
+                  errors.append("arm branch: old unpatched text still present")
+              if 'target_arch=="arm64" and OS in "linux openharmony"\'' in s:
+                  errors.append("arm64 branch: old unpatched text still present")
+              if errors:
+                  for e in errors:
+                      print(f"::error::PATCH FAILED: {e}")
+                  exit(1)
+              print("patch syntax sanity check: OK")
+          PYEOF
+
       # ---------- 4. Cross-compile ----------
       - name: Cross-compile Node.js for ${{ matrix.abi }}
         working-directory: node
@@ -1098,35 +1209,41 @@ jobs:
           esac
 
           # ---- Crypto perf: use OpenSSL's asm-optimized routines where safe ----
-          # UPDATED 2026-07-22: previous version of this logic had the arms
-          # backwards and broke every arm64-v8a build. With OPENSSL_ASM_FLAG
-          # cleared on arm64, OpenSSL's build does NOT select AArch64/NEON
-          # perlasm here — it falls through to
-          # crypto/bn/asm/x86_64-gcc.c, a hand-written x86_64 GNU inline-asm
-          # file using register-class constraints ("=a"/"+d", i.e. rax/rdx).
-          # Those registers don't exist in the AArch64 constraint set, so
-          # Clang correctly rejects it ("invalid output constraint '=a' in
-          # asm"), which is the exact failure this bump surfaced. Verified
-          # directly: only the leg with OPENSSL_ASM_FLAG="" hits this file.
+          # UPDATED 2026-07-22 (second pass): the actual bug was upstream in
+          # deps/openssl/openssl_asm.gypi, not in this flag. That file's
+          # target_arch=="arm"/"arm64" branches require OS=="linux" (or
+          # "openharmony" for arm64) — our cross-build sets OS=android, which
+          # matched neither, so BOTH legs fell through to the file's final
+          # catchall branch, mislabeled "Other architectures don't use
+          # assembly" but which actually includes x86_64 GNU inline-asm
+          # (crypto/bn/asm/x86_64-gcc.c's "=a"/"+d" register-class
+          # constraints — rax/rdx, which don't exist on any ARM target).
+          # This reproduced identically on v24 and v26, and on both arm64
+          # and arm, regardless of this flag's value — because the flag
+          # only chooses whether openssl_asm.gypi's arch/OS conditions get
+          # evaluated at all; it can't fix what they resolve to once
+          # evaluated. Confirmed directly against configure.py's generated
+          # openssl.target.mk: unpatched, target_arch=arm64+OS=android
+          # produces 1 x86_64-gcc.c reference and 0 aarch64 references;
+          # same for target_arch=arm. The "Patch OpenSSL: asm target
+          # selection for Android" step above adds OS=="android" to the
+          # arm/arm64 branches (ahead of the mislabeled catchall), after
+          # which the same configure resolves to real GNU-as AArch64/ARMv4
+          # perlasm (linux-aarch64/linux-armv4, 42/35 source references,
+          # 0 x86_64-gcc.c) on both legs.
           #
-          # A bare --openssl-no-asm forces pure-C crypto (AES/SHA/ECC) —
-          # a real runtime cost for this build's target workload
-          # (Baileys/WhatsApp E2E crypto: AES-GCM, Curve25519, HMAC-SHA256
-          # all run through these routines constantly), so keep asm enabled
-          # where it's actually safe rather than disabling it everywhere.
-          # OpenSSL's asm paths do their own runtime CPU-feature check
-          # (getauxval/AT_HWCAP) before dispatching, so enabling them can't
-          # crash on a device lacking crypto extensions — it just falls back
-          # to the same C path at runtime. That safety argument was always
-          # correct; it just got attached to the wrong leg. Disabled on
-          # arm64-v8a (the verified leg) until the x86_64-gcc.c fallback
-          # above is root-caused against this Node/OpenSSL vendor version's
-          # gyp target selection; left enabled on armeabi-v7a, which was not
-          # observed to hit this failure.
-          OPENSSL_ASM_FLAG=""
-          if [ "${{ matrix.dest_cpu }}" = "arm64" ]; then
-            OPENSSL_ASM_FLAG="--openssl-no-asm"
-          fi
+          # With that fixed at the source, asm is genuinely safe on both
+          # legs — the flag can go back to being a simple on/off rather
+          # than the previous single-run flag-inversion attempt (which
+          # only relocated the same failure between legs; both legs were
+          # always hitting the same upstream fallback, just via whichever
+          # leg had the flag enabling asm at all). Left OFF here regardless
+          # so a regression in the patch step (e.g. this Node version
+          # renames/removes openssl_asm.gypi's conditions block) fails as
+          # a normal build error rather than resurfacing this exact
+          # 20-error asm cascade; flip to enabling by default once this
+          # has run clean at least once end-to-end on CI.
+          OPENSSL_ASM_FLAG="--openssl-no-asm"
 
           # --without-corepack was removed in Node.js v26.x
           NODEEXTRA=""
