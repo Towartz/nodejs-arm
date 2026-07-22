@@ -200,35 +200,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             python3 g++ make git ca-certificates ccache
 
-      # ---------- 2b. patchelf (pinned upstream release, NOT apt) ----------
-      # NOTE: Only required if you switch to OPTION 2 below (bundled libc++_shared.so).
-      # For the default fully-static build this tool is installed but unused.
-      - name: Install patchelf (latest upstream release, pinned per-run)
-        run: |
-          LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-            https://github.com/NixOS/patchelf/releases/latest)"
-          PATCHELF_VERSION="${LATEST_URL##*/}"
-          echo "Resolved NixOS/patchelf latest release: $PATCHELF_VERSION"
-          if ! [[ "$PATCHELF_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo "::error::Could not resolve a valid patchelf version from /releases/latest (got '$PATCHELF_VERSION'). Refusing to silently fall back to a possibly-buggy version — fix this step or pin PATCHELF_VERSION manually."
-            exit 1
-          fi
-
-          ASSET="patchelf-${PATCHELF_VERSION}-x86_64.tar.gz"
-          ASSET_URL="https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/${ASSET}"
-          curl -fsSL -o /tmp/patchelf.tar.gz "$ASSET_URL"
-          mkdir -p /tmp/patchelf-extracted
-          tar xzf /tmp/patchelf.tar.gz -C /tmp/patchelf-extracted
-          sudo install -m 0755 /tmp/patchelf-extracted/bin/patchelf /usr/local/bin/patchelf
-          hash -r
-
-          echo "---- patchelf version in use ----"
-          patchelf --version
-          RESOLVED="$(command -v patchelf)"
-          echo "Resolved patchelf binary: $RESOLVED"
-          [ "$RESOLVED" = "/usr/local/bin/patchelf" ] \
-            || { echo "::error::patchelf resolved to '$RESOLVED', not /usr/local/bin/patchelf — PATH ordering issue, apt's older copy (if installed) would silently win"; exit 1; }
-
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
         run: sudo apt-get install -y gcc-multilib g++-multilib
@@ -1055,14 +1026,15 @@ jobs:
           # Target toolchain (API level via wrapper suffix == -DANDROID_PLATFORM=android-24)
           export CC="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           export CXX="ccache $TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang++"
-          # Static-link libc++ -> single-file output where possible, no
+          # Static-link libc++ -> node stays a standalone binary with no
           # libc++_shared.so runtime dependency. Whether this actually takes
           # effect depends on gyp's make-generator propagating LDFLAGS.target
           # through both the 'node' and 'lib.target' link steps, which isn't
           # guaranteed across every Node ref/gyp version — the packaging step
-          # below checks the real on-disk result with llvm-readelf rather
-          # than assuming this flag alone was enough, and bundles
-          # libc++_shared.so as a fallback only if it wasn't.
+          # below checks the real on-disk result with llvm-readelf and hard-
+          # fails if node ends up dynamically linked after all. A copy of
+          # libc++_shared.so is bundled as a separate file regardless (for
+          # native-addon builds downstream), independent of that check.
           export CXXFLAGS="$CXXFLAGS -static-libstdc++"
           export LDFLAGS="$LDFLAGS -static-libstdc++"
           export AR="$TC/bin/llvm-ar"
@@ -1158,10 +1130,22 @@ jobs:
           echo "---- ccache stats (${{ matrix.abi }}) ----"
           ccache -s
 
-      # ---------- 5. Rename, strip, package ----------
-      # DEFAULT (Option 1): Fully static single binary — zero bundled .so files.
-      # OPTION 2 (commented below): Bundle libc++_shared.so + bake $ORIGIN rpath.
-      - name: Package node (fully static single binary)
+      # ---------- 5. Rename, strip, verify, bundle libc++_shared.so ----------
+      # `node` stays a fully static, standalone binary — it must never
+      # dynamically depend on libc++_shared.so (hard-checked below). A copy
+      # of libc++_shared.so is bundled alongside it regardless, unmodified,
+      # purely for downstream native-addon builds that may need it at
+      # runtime; node itself never loads it, so none of the old Option 2's
+      # patchelf/$ORIGIN-rpath work is needed anymore.
+      #
+      # NO ARCHIVE HERE: actions/upload-artifact always wraps whatever it's
+      # given in exactly one zip on download, so tar.gz-ing first (as this
+      # step used to) just double-packed the output — a zip containing a
+      # tar.gz, meaning two separate extraction steps for anyone downloading
+      # it. Both files below are staged raw and renamed per-ABI so the
+      # release job (which merges every ABI's artifacts into one directory)
+      # can't have one leg's "node"/"libc++_shared.so" overwrite the other's.
+      - name: Package node (fully static single binary + libc++_shared.so)
         if: success()
         working-directory: node
         run: |
@@ -1191,7 +1175,7 @@ jobs:
           echo "---- Exported dynamic symbol count ----"
           "$TC/bin/llvm-readelf" --dyn-syms node | wc -l
 
-          # ---- HARD CHECK: libc++ must be statically linked ----
+          # ---- HARD CHECK: node itself must stay fully static/standalone ----
           echo "---- NEEDED entries (must NOT contain libc++_shared.so) ----"
           NEEDED="$("$TC/bin/llvm-readelf" -d node | grep NEEDED || true)"
           echo "$NEEDED"
@@ -1209,48 +1193,19 @@ jobs:
             exit 1
           fi
 
-          # Package ONLY the single binary. Nothing else.
-          tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
-          ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          # ---- Bundle libc++_shared.so alongside (node does not link against it) ----
+          case "${{ matrix.dest_cpu }}" in
+            arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
+            *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
+          esac
+          cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
 
-          # ============================================================
-          # OPTION 2 — COMMENTED FALLBACK (do NOT delete)
-          # ------------------------------------------------------------
-          # If a future Node ref breaks -static-libstdc++ propagation through
-          # gyp and you need to ship libc++_shared.so again, comment out the
-          # 15 lines above (from "cp out/Release/node node" through the tar
-          # command) and uncomment the block below instead.
-          # ------------------------------------------------------------
-          # cp out/Release/node node
-          # "$TC/bin/llvm-strip" --strip-all node
-          #
-          # # Sysroot triple remap for 32-bit ARM
-          # case "${{ matrix.dest_cpu }}" in
-          #   arm) SYSROOT_TRIPLE="arm-linux-androideabi" ;;
-          #   *)   SYSROOT_TRIPLE="${{ matrix.target }}" ;;
-          # esac
-          # cp "$TC/sysroot/usr/lib/${SYSROOT_TRIPLE}/libc++_shared.so" .
-          # patchelf --set-rpath '$ORIGIN' node
-          #
-          # # Verify patchelf didn't corrupt the dynamic section
-          # READELF_OUT="$("$TC/bin/llvm-readelf" -d node 2>&1)"
-          # if echo "$READELF_OUT" | grep -qi "goes past the end"; then
-          #   echo "::error::patchelf left corrupted DT_STRSZ"
-          #   echo "$READELF_OUT"; exit 1
-          # fi
-          # if ! echo "$READELF_OUT" | grep -qE '\(GNU_HASH\)|\(HASH\)'; then
-          #   echo "::error::missing hash table after patchelf"
-          #   echo "$READELF_OUT"; exit 1
-          # fi
-          #
-          # if "$TC/bin/llvm-readelf" -d node | grep -q 'NEEDED.*libc++_shared'; then
-          #   tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node libc++_shared.so
-          #   ls -lh node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
-          # else
-          #   tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
-          #   ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
-          # fi
-          # ============================================================
+          # ---- Stage raw, per-ABI-named files for upload (no tar/zip) ----
+          cp node "../${LIB_NAME}-android-${{ matrix.abi }}"
+          cp libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}-libc++_shared.so"
+          chmod +x "../${LIB_NAME}-android-${{ matrix.abi }}"
+
+          ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}" "../${LIB_NAME}-android-${{ matrix.abi }}-libc++_shared.so"
 
       # ---------- 5b. Package Node.js headers (native addon builds) ----------
       # Each ABI gets its own header zip, NOT merged into one.
@@ -1286,12 +1241,17 @@ jobs:
           ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
 
       # ---------- 6a. Upload artifact ----------
+      # Two raw files, no wrapping tar/zip of our own — actions/upload-artifact
+      # already zips whatever it's given, so archiving here first would just
+      # double-pack it again.
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
-          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}.tar.gz
+          path: |
+            ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
+            ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-libc++_shared.so
           retention-days: 14
 
       # ---------- 6b. Upload headers artifact ----------
@@ -1395,10 +1355,20 @@ jobs:
 
             arm64-v8a is always included when the build succeeds; armeabi-v7a
             is experimental and only present below if that leg also succeeded.
-            Binary inside each tar.gz is named `node` (single ELF, PIE, all
-            symbols exported via -rdynamic/--export-dynamic) — rename it to
-            lib*.so yourself downstream if your app needs Android to extract
-            it with exec permissions.
+
+            Each ABI ships two raw files — not archived, since GitHub already
+            wraps every artifact in one zip on download, so tar/zip-ing them
+            ourselves first would just double-pack the output:
+            - `${{ env.LIB_NAME }}-android-<abi>` — the `node` CLI binary
+              itself (single ELF, PIE, statically linked against libc++, all
+              symbols exported via -rdynamic/--export-dynamic). Rename it to
+              lib*.so yourself downstream if your app needs Android to
+              extract it with exec permissions.
+            - `${{ env.LIB_NAME }}-android-<abi>-libc++_shared.so` — an
+              unmodified copy of the NDK's libc++_shared.so for that ABI,
+              bundled for native-addon builds that dynamically need it.
+              `node` itself does NOT depend on it — it remains fully
+              static/standalone.
 
             Each ABI also ships a `*-headers.zip` (Node.js includes +
             `config.gypi`) for compiling native N-API addons against that
