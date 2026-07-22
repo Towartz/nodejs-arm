@@ -1217,16 +1217,20 @@ jobs:
       #
       # Layout include/node/*.h follows the official node-vX.Y.Z-headers.tar.gz
       # structure from nodejs.org — this is what node-gyp/node-addon-api reads
-      # via `npm config set nodedir=...` when compiling native modules. Full
-      # set: Node's own public headers, all of V8's + libuv's includes, plus
-      # the bundled OpenSSL and zlib headers (both statically bundled by
-      # default, so addons touching crypto or compression need these too) —
-      # matching everything the official headers tarball ships.
+      # via `npm config set nodedir=...` when compiling native modules. Set:
+      # Node's own public headers plus all of V8's + libuv's includes.
+      # Bundled OpenSSL/zlib headers are intentionally NOT packaged here.
       - name: Package Node.js headers (${{ matrix.abi }})
         if: success()
         working-directory: node
         run: |
-          HDR_DIR="node-headers/include/node"
+          # Top-level dir is named per-ABI (not just "node-headers") so that
+          # arm64-v8a and armeabi-v7a stay as two distinctly-named folders
+          # after the release job's merge-multiple download — same
+          # distinctness the old "-headers.zip" filename used to give, but
+          # without pre-zipping the contents ourselves (see 6b below).
+          HDR_ROOT="${LIB_NAME}-android-${{ matrix.abi }}-headers"
+          HDR_DIR="$HDR_ROOT/include/node"
           mkdir -p "$HDR_DIR"
 
           cp common.gypi "$HDR_DIR/"
@@ -1235,39 +1239,9 @@ jobs:
           cp -r deps/v8/include/. "$HDR_DIR/"
           cp -r deps/uv/include/. "$HDR_DIR/"
 
-          # ---- Bundled OpenSSL headers ----
-          # Node statically bundles its own OpenSSL (node_shared_openssl=false
-          # by default; --openssl-no-asm above only disables asm codegen, it
-          # doesn't switch to a system OpenSSL) — native addons that touch
-          # crypto need these to compile against the exact bundled version,
-          # same as the official node-vX.Y.Z-headers.tar.gz ships them.
-          if [ -d deps/openssl/openssl/include/openssl ]; then
-            mkdir -p "$HDR_DIR/openssl"
-            cp -r deps/openssl/openssl/include/openssl/. "$HDR_DIR/openssl/"
-            cp -r deps/openssl/config/. "$HDR_DIR/openssl/"
-          else
-            echo "::error::deps/openssl/openssl/include/openssl not found — expected for a node_shared_openssl=false build"
-            exit 1
-          fi
-
-          # ---- Bundled zlib headers ----
-          # Same reasoning: node_shared_zlib=false by default, so addons doing
-          # compression against Node's bundled zlib need these two headers.
-          if [ -f deps/zlib/zlib.h ]; then
-            cp deps/zlib/zconf.h deps/zlib/zlib.h "$HDR_DIR/"
-          else
-            echo "::error::deps/zlib/zlib.h not found — expected for a node_shared_zlib=false build"
-            exit 1
-          fi
-
           echo "---- Header contents per ABI (${{ matrix.abi }}) ----"
           find "$HDR_DIR" -name "*.h" | wc -l
           grep -E "target_arch|byteorder" "$HDR_DIR/config.gypi"
-
-          cd node-headers
-          zip -rq "../../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip" include
-          cd ..
-          ls -lh "../${LIB_NAME}-android-${{ matrix.abi }}-headers.zip"
 
       # ---------- 6a. Upload artifact ----------
       # Two raw files, no wrapping tar/zip of our own — actions/upload-artifact
@@ -1284,15 +1258,17 @@ jobs:
           retention-days: 14
 
       # ---------- 6b. Upload headers artifact ----------
-      # Artifact name gets a -headers suffix so it differs from the binary
-      # artifact above. The release job below downloads both via separate
-      # patterns.
+      # Raw folder, no manual zip — same reasoning as 6a: upload-artifact
+      # already archives whatever it's given, so pre-zipping here would
+      # double-pack it (a zip inside the zip a UI download produces). The
+      # folder name itself (not a zip filename) is what keeps this ABI's
+      # headers distinct after the release job's merge-multiple download.
       - name: Upload headers artifact
         if: success()
         uses: actions/upload-artifact@v7
         with:
           name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
-          path: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers.zip
+          path: node/${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
           retention-days: 14
 
 
@@ -1300,10 +1276,12 @@ jobs:
   # Single job, runs once after all matrix legs finish (armeabi-v7a's
   # continue-on-error keeps this from being blocked by that experimental
   # leg failing — see `build.strategy.matrix` above). Downloads whatever
-  # per-ABI artifacts got uploaded and attaches all of them to one release,
-  # auto-naming/auto-tagging when the run wasn't itself a tag push so every
-  # workflow_dispatch/branch-push build still gets a release without manual
-  # tagging, and using GitHub's own commit-based changelog generation.
+  # per-ABI artifacts got uploaded, zips the raw header folders into single
+  # files (Releases only accept files — see the zip step below), and
+  # attaches everything to one release, auto-naming/auto-tagging when the
+  # run wasn't itself a tag push so every workflow_dispatch/branch-push
+  # build still gets a release without manual tagging, and using GitHub's
+  # own commit-based changelog generation.
   release:
     name: Create GitHub Release
     needs: build
@@ -1359,6 +1337,21 @@ jobs:
       - name: List downloaded artifacts
         run: ls -lh dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
 
+      # Header artifacts arrive as raw folders (see build job 6b — no
+      # pre-zipping there, to avoid a zip-inside-a-zip on UI download).
+      # GitHub Releases only accepts files, though, so this is the one
+      # place a zip gets made — once, directly into the final asset, not
+      # layered on top of an already-zipped upload-artifact archive.
+      - name: Zip header artifacts for release
+        run: |
+          shopt -s nullglob
+          for dir in dist/*-headers; do
+            [ -d "$dir" ] || continue
+            ( cd "$dir" && zip -rq "../$(basename "$dir").zip" . )
+            rm -rf "$dir"
+          done
+          ls -lh dist
+
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -1400,8 +1393,9 @@ jobs:
               static/standalone.
 
             Each ABI also ships a `*-headers.zip` — Node's public headers,
-            all of V8's and libuv's includes, the bundled OpenSSL and zlib
-            headers, and `config.gypi` — for compiling native N-API addons
-            against that specific build. Use the headers matching the target
-            ABI — `config.gypi` differs between arm64-v8a and armeabi-v7a.
+            all of V8's and libuv's includes, and `config.gypi` — for
+            compiling native N-API addons against that specific build. Use
+            the headers matching the target ABI — `config.gypi` differs
+            between arm64-v8a and armeabi-v7a. (Bundled OpenSSL/zlib headers
+            are not included.)
           files: dist/*
