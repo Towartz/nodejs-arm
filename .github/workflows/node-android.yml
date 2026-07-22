@@ -20,7 +20,7 @@ name: Node.js for Android (ARM)
 
 on:
   push:
-    branches: [main]
+    branches: [v24.x-lts]
     tags: ['v*']
   workflow_dispatch:
     inputs:
