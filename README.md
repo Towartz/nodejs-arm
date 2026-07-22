@@ -2,8 +2,8 @@
 
 # Node.js for Android ARM — **v24.x LTS**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=v24.x-lts&label=CI&logo=github&color=success)](https://github.com/Towartz/nodejs-arm/actions)
-[![Last build](https://img.shields.io/badge/last%20build-%23137%20(Jul%2022)-success)](https://github.com/Towartz/nodejs-arm/actions/runs/29906564203)
+[![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=v24.x-lts&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
+[![Last build](https://img.shields.io/badge/last%20build-%23137%20(Jul%2022)-success)](https://github.com/Towartz/nodejs-arm/actions/runs/29913681810)
 [![Latest release](https://img.shields.io/badge/latest%20release-v24.x--run117-blue?logo=github)](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run117)
 [![NDK](https://img.shields.io/badge/NDK-r29(Clang%2019)-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
