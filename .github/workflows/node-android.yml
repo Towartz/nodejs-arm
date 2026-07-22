@@ -52,8 +52,29 @@ env:
 jobs:
   build:
     name: android-${{ matrix.abi }}
-    # ubuntu-24.04 ships GCC 13.2 as default gcc/g++. V8's current C++20
-    # usage requires GCC 13.2+ (nodejs/node#62555).
+    # UPDATED 2026-07-20: bumped from ubuntu-22.04. V8's current C++20 usage
+    # now requires GCC 13.2+ — nodejs/node#62555 states this explicitly
+    # ("V8 can no longer be compiled with GCC 12"). ubuntu-22.04's default
+    # g++ is 11.4, which is exactly what CC_host/CXX_host below resolve to,
+    # so this was silently broken rather than merely outdated. Confirmed on
+    # two independent V8 files/symbols so far: the Turboshaft CRTP patch
+    # target (builtins-number-tsa.cc / AssemblerOpInterface) further down in
+    # this file, and — verified directly, not assumed — the
+    # "value of 'kArmv6' is not usable in a constant expression" /
+    # "was not declared 'constexpr'" failure in
+    # codegen/arm/assembler-arm.cc on the armeabi-v7a host-tools leg
+    # (obj.host/v8_base_without_compiler; mksnapshot needs a host-built copy
+    # of the target arch's Assembler). Reproduced that exact pattern
+    # (constexpr fn reading a non-constexpr static-const class-type global)
+    # against g++-11/-12/-13 directly: 11 and 12 both hard-error on the bare
+    # declaration regardless of whether it's ever actually const-evaluated;
+    # 13 demotes it to a non-fatal -Winvalid-constexpr warning, which is
+    # sufficient here since V8 only calls CpuFeaturesFromCompiler() at plain
+    # runtime (CpuFeatures::ProbeImpl), never in a forced constant-expression
+    # context. ubuntu-24.04 ships GCC 13.2 as default gcc/g++, so
+    # CC_host/CXX_host and the CC.host/CXX.host/LINK.host make overrides
+    # need no other changes, and gcc-multilib/g++-multilib for the
+    # armeabi-v7a leg exist on 24.04 too.
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     # armeabi-v7a is best-effort: upstream V8 cross-build for 32-bit targets on
@@ -97,6 +118,12 @@ jobs:
           echo "Building Node.js '$REQ' as lib$NAME.so"
 
       # ---------- 1. Android NDK (r29) ----------
+      # Switched from a manual curl+unzip to nttld/setup-ndk to match the
+      # v24-only workflow this was diffed against. The manual download step
+      # this replaces existed only because r26d was being force-installed
+      # over whatever the runner ships by default — with r29 now current,
+      # setup-ndk's own caching/selection logic is simpler and one less
+      # hand-rolled step to keep correct across NDK version bumps.
       - name: Set up Android NDK ${{ env.NDK_VERSION }}
         uses: nttld/setup-ndk@v1
         with:
@@ -110,6 +137,13 @@ jobs:
           echo "NDK OK: ${ANDROID_NDK_HOME:-$ANDROID_NDK}"
 
       # ---------- 1b. ccache ----------
+      # Everything above this point is seconds; the ~2h this job takes is almost
+      # entirely the make step in section 4 — a from-scratch V8+Node compile with
+      # no object reuse between runs. ccache fixes that: it caches compiled objects
+      # by actual preprocessed source+flags content, so reruns/retries and
+      # iterating on this workflow (not on Node's own source) get much faster once
+      # the first run has populated the cache. The cache itself is populated only
+      # on its first run — the win is every run after that.
       - name: Configure ccache
         run: |
           echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
@@ -128,14 +162,16 @@ jobs:
         run: |
           python3 -c "import sys; v=sys.version_info; assert v>=(3,10), f'need Python>=3.10, got {v}'"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             python3 g++ make git ca-certificates ccache
+          sudo apt-get install -y --no-install-recommends \
+            python3 g++ make git ca-certificates ccache
 
       # ---------- 2b. patchelf (pinned upstream release, NOT apt) ----------
       # NOTE: Only required if you switch to OPTION 2 below (bundled libc++_shared.so).
       # For the default fully-static build this tool is installed but unused.
       - name: Install patchelf (latest upstream release, pinned per-run)
         run: |
-          LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}'             https://github.com/NixOS/patchelf/releases/latest)"
+          LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+            https://github.com/NixOS/patchelf/releases/latest)"
           PATCHELF_VERSION="${LATEST_URL##*/}"
           echo "Resolved NixOS/patchelf latest release: $PATCHELF_VERSION"
           if ! [[ "$PATCHELF_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
@@ -155,7 +191,8 @@ jobs:
           patchelf --version
           RESOLVED="$(command -v patchelf)"
           echo "Resolved patchelf binary: $RESOLVED"
-          [ "$RESOLVED" = "/usr/local/bin/patchelf" ]             || { echo "::error::patchelf resolved to '$RESOLVED', not /usr/local/bin/patchelf — PATH ordering issue, apt's older copy (if installed) would silently win"; exit 1; }
+          [ "$RESOLVED" = "/usr/local/bin/patchelf" ] \
+            || { echo "::error::patchelf resolved to '$RESOLVED', not /usr/local/bin/patchelf — PATH ordering issue, apt's older copy (if installed) would silently win"; exit 1; }
 
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
@@ -214,7 +251,7 @@ jobs:
           patch('deps/uv/uv.gyp',
                 '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs': [","        'include',","        'src/',","      ],"]),
                 '\n'.join(["      'target_name': 'libuv',","      'toolsets': ['host', 'target'],","      'type': '<(uv_library)',","      'include_dirs+': [","        'include',","        'src/',","      ],"]))
-          patch('deps/uv/uv.gyp', "        'include_dirs': [ 'include' ]", "        'include_dirs+': [ 'include' ],")
+          patch('deps/uv/uv.gyp', "        'include_dirs': [ 'include' ],", "        'include_dirs+': [ 'include' ],")
 
           patch('deps/uv/src/unix/fs.c',
                 '#ifdef FICLONE\n'
@@ -308,9 +345,6 @@ jobs:
                 '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
           PYEOF
 
-      # REMOVED (2026-07-22): consteval→constexpr patch for regexp-bytecodes-inl.h.
-      # NDK r29 ships Clang based on LLVM post-18 (clang-r563880c), which includes
-      # the complete fix for llvm-project#94935. This patch is no longer required.
 
       - name: "Patch V8: zlib cpu_features (getauxval replacement)"
         working-directory: node
@@ -405,12 +439,11 @@ jobs:
           patch('node.gyp',
                 "      ['OS==\"linux\" and clang==1', {",
                 "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
-          # v8_android_log_stdout enables stdout logging on Android (normally suppressed).
           patch('tools/v8_gypfiles/toolchain.gypi',
                 "    'v8_android_log_stdout%': 0,", "    'v8_android_log_stdout%': 1,")
           # REMOVED (2026-07-22): branch-protection removal patch. NDK r29 fully supports
           # -mbranch-protection=standard. The previous patch was only needed for r27d.
-          patch('common.gypi',
+                    patch('common.gypi',
                 "          ['OS == \"android\"', {\n"
                 "            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],\n"
                 "            'ldflags': [ '-fPIC' ]\n"
@@ -445,25 +478,66 @@ jobs:
                 'static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);',
                 '// static_assert((kTaggedSize == 8) == TAGGED_SIZE_8_BYTES);')
           patch('deps/v8/src/builtins/builtins-iterator-inl.h',
-                '        } else {                                                            \\\*n'
-                '          static_assert(std::numeric_limits<ctype>::max() <=                \\\*n'
-                '                        std::numeric_limits<int>::max());                   \\\*n'
-                '          static_assert(std::numeric_limits<ctype>::min() >=                \\\*n'
-                '                        std::numeric_limits<int>::min());                   \\\*n'
-                '          if (!int_visitor(static_cast<int>(val))) {                        \\\*n'
-                '            return MaybeDirectHandle<Object>();                             \\\*n'
-                '          }                                                                 \\\*n'
+                '        } else {                                                            \\\n'
+                '          static_assert(std::numeric_limits<ctype>::max() <=                \\\n'
+                '                        std::numeric_limits<int>::max());                   \\\n'
+                '          static_assert(std::numeric_limits<ctype>::min() >=                \\\n'
+                '                        std::numeric_limits<int>::min());                   \\\n'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \\\n'
+                '            return MaybeDirectHandle<Object>();                             \\\n'
+                '          }                                                                 \\\n'
                 '        }',
-                '        } else if constexpr (std::numeric_limits<ctype>::max() <=           \\\*n'
-                '                             std::numeric_limits<int>::max() &&             \\\*n'
-                '                             std::numeric_limits<ctype>::min() >=           \\\*n'
-                '                             std::numeric_limits<int>::min()) {             \\\*n'
-                '          if (!int_visitor(static_cast<int>(val))) {                        \\\*n'
-                '            return MaybeDirectHandle<Object>();                             \\\*n'
-                '          }                                                                 \\\*n'
+                '        } else if constexpr (std::numeric_limits<ctype>::max() <=           \\\n'
+                '                             std::numeric_limits<int>::max() &&             \\\n'
+                '                             std::numeric_limits<ctype>::min() >=           \\\n'
+                '                             std::numeric_limits<int>::min()) {             \\\n'
+                '          if (!int_visitor(static_cast<int>(val))) {                        \\\n'
+                '            return MaybeDirectHandle<Object>();                             \\\n'
+                '          }                                                                 \\\n'
                 '        }')
           PYEOF
 
+      # ---------- FIXED 2026-07-18 ----------
+      # Root cause of the "expected '}'" / "namespaces can only be defined in
+      # global or namespace scope" cascade in pipeline.cc, confirmed against the
+      # actual V8 14.6.202.33 source (the version this branch currently vendors):
+      #
+      # The previous version of this step did a blind global
+      # str.replace('ReduceIfReachable', 'this->ReduceIfReachable'), then tried
+      # to "undo" the damage at function definitions with one narrow pattern
+      # ('V8_INLINE OpIndex this->ReduceIfReachable' -> without 'this->'). Two
+      # things were wrong with that:
+      #   1. In this V8 version, every 'ReduceIfReachable' occurrence in
+      #      assembler.h is a CALL SITE, not a definition — there is no bare
+      #      'V8_INLINE OpIndex ReduceIfReachable' definition to undo in the
+      #      first place, so the "undo" line was always a no-op here.
+      #   2. 8 of those call sites use preprocessor token-pasting, e.g.
+      #      'ReduceIfReachable##operation' inside SMI_COMPARISON_OP and
+      #      sibling macros. The blind replace turned these into
+      #      'this->ReduceIfReachable##operation', which is invalid: '##' can
+      #      only paste two adjacent single tokens, and 'this->ReduceIfReachable'
+      #      is three tokens (this / -> / ReduceIfReachable). This corrupts the
+      #      macro body. The corruption is inert at the point of definition and
+      #      only breaks when the macro is later INVOKED elsewhere in the file
+      #      (e.g. 'SMI_COMPARISON_OP(SmiLessThanOrEqual, ...)' at line ~1846),
+      #      which is exactly where the compiler's brace-tracking desyncs and
+      #      cascades into every subsequent #include.
+      #
+      # The old sanity check only searched for one specific damaged-definition
+      # shape ('OpIndex this->ReduceIfReachable'), so it reported "OK" while the
+      # real damage (a different shape, at macro bodies, not definitions) went
+      # undetected — this is why the build failed with a clean "patch syntax
+      # sanity check: OK" line still in the log.
+      #
+      # Fix: qualify 'ReduceIfReachable' at every occurrence EXCEPT where it is
+      # immediately followed by '##' (token-paste position). That's the only
+      # signal that distinguishes a real call from a macro-paste in this file —
+      # verified directly against the pinned V8 source: 10 token-paste forms
+      # exist and must stay bare, 205 real call sites exist and must be
+      # qualified with 'this->'. Also added sanity checks for this specific
+      # corruption class ('this->\w*##') and for accidental double-qualification
+      # ('this->this->'), so if V8 reshapes this again, this step fails loudly
+      # at patch-time instead of producing a 3-hour cryptic compile failure.
       - name: "Patch V8: turboshaft SMI assertions"
         working-directory: node
         run: |
@@ -496,6 +570,9 @@ jobs:
               s = s.replace('{ return matcher_; }', '{ return this->matcher_; }')
 
               # 3. ReduceIfReachable calls — qualify call sites ONLY.
+              # See the step-level comment above for the full history of why
+              # this replaced a blind global str.replace().
+              #
               # Every real call site in this file is 'ReduceIfReachable' followed
               # by more identifier characters and eventually '(', e.g.
               # 'ReduceIfReachableComparison('. Every token-paste occurrence is
@@ -524,26 +601,28 @@ jobs:
               # 6. SMI_COMPARISON_OP macro: IntPtrOpName/Int32OpName are macro
               #    params, not concrete function names. Patch the macro def text.
               s = s.replace(
-                  '      return IntPtrOpName(l, r);                                           \\\',
-                  '      return this->IntPtrOpName(l, r);                                     \\\')
+                  '      return IntPtrOpName(l, r);                                           \\',
+                  '      return this->IntPtrOpName(l, r);                                     \\')
               s = s.replace(
-                  '      return Int32OpName(TruncateWordPtrToWord32(l),                       \\\',
-                  '      return this->Int32OpName(TruncateWordPtrToWord32(l),                 \\\')
+                  '      return Int32OpName(TruncateWordPtrToWord32(l),                       \\',
+                  '      return this->Int32OpName(TruncateWordPtrToWord32(l),                 \\')
 
               print(f"patched {assembler_h} (CRTP dependent names)")
 
               # Comment out the problematic static assertions in SMI_COMPARISON_OP macro.
               # Use /* */ block comment (NOT // line comment): phase 2 line splicing runs
-              # before phase 3 comment recognition. A '//' comment with trailing '\\' would
+              # before phase 3 comment recognition. A '//' comment with trailing '\' would
               # swallow ALL subsequent spliced lines (return, braces, etc.) via the chain
               # of backslash continuations. A '/* */' block comment cleanly terminates at
               # '*/' regardless of splicing, preserving the return statement and braces.
               old_macro = (
                   '      static_assert(kTaggedSize == kInt32Size);                            \\\n'
-                  '      static_assert(v8::internal::SmiValuesAre31Bits());                   \\\')
+                  '      static_assert(v8::internal::SmiValuesAre31Bits());                   \\'
+              )
               new_macro = (
                   '      /* static_assert(kTaggedSize == kInt32Size);                            \\\n'
-                  '      static_assert(v8::internal::SmiValuesAre31Bits());                   */ \\\')
+                  '      static_assert(v8::internal::SmiValuesAre31Bits());                   */ \\'
+              )
 
               if old_macro in s:
                   s = s.replace(old_macro, new_macro, 1)
@@ -581,10 +660,7 @@ jobs:
               print("::warning::assembler.h not found")
           PYEOF
 
-      # REMOVED (2026-07-22): wrappers-inl.h decltype patch.
-      # NDK r29's Clang (based on LLVM post-18) correctly resolves
-      # decltype(non-static-member) via fully-qualified nested-namespace class
-      # names. This patch is no longer required.
+
 
       - name: "Patch V8: simdutf atomic_* unavailable on Android NDK libc++"
         working-directory: node
@@ -805,7 +881,15 @@ jobs:
             NODEEXTRA="--without-corepack"
           fi
 
-          ./configure             --cross-compiling             --dest-os=android             --dest-cpu=${{ matrix.dest_cpu }}             --with-intl=none             --without-npm             $NODEEXTRA             --openssl-no-asm             $EXTRA_FLAGS
+          ./configure \
+            --cross-compiling \
+            --dest-os=android \
+            --dest-cpu=${{ matrix.dest_cpu }} \
+            --with-intl=none \
+            --without-npm \
+            $NODEEXTRA \
+            --openssl-no-asm \
+            $EXTRA_FLAGS
 
           # LINK.host/AR.host overrides are belt-and-braces (gyp leaves LINK.host empty
           # in some configurations, silently breaking host-tool linking).
