@@ -1,4 +1,3 @@
-
 <div align="center">
 
 # Node.js for Android (ARM)
@@ -10,120 +9,120 @@
 [![Node](https://img.shields.io/badge/Node-v26.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 
-Standalone `node` CLI cross-compiled for Android ARM, built with GitHub Actions.
+通过 GitHub Actions 交叉编译的 Android ARM 独立 node 命令行程序。
 
-Binary statis, terhubung langsung ke libc++. Tidak butuh dependensi eksternal. Setiap rilis berisi binary, `libc++_shared.so` untuk build native addon, dan header lengkap untuk kompilasi N-API.
+二进制文件完全静态链接 libc++，不依赖任何外部库。每个发布包都包含二进制文件、用于编译原生插件的 libc++_shared.so，以及完整的 N-API 编译头文件。
 
 </div>
 
 ---
 
-## Status build
+## 构建状态
 
-| ABI | Balanced (JIT + `-O3`) | Speed (LTO) | Size (V8 lite mode) |
+| ABI | 均衡模式 (JIT + -O3) | 速度模式 (LTO) | 体积模式 (V8 精简模式) |
 |---|---|---|---|
-| `arm64-v8a` | Terverifikasi | Terverifikasi | Terverifikasi |
-| `armeabi-v7a` | Berhasil, eksperimental | Eksperimental | Eksperimental |
+| arm64-v8a | 已验证 | 已验证 | 已验证 |
+| armeabi-v7a | 可构建，实验性 | 实验性 | 实验性 |
 
-`armeabi-v7a` masih eksperimental karena bug cross-build V8 di upstream. Detail ada di [nodejs/node#58975](https://github.com/nodejs/node/issues/58975). Build ini tidak pernah memblokir hasil `arm64-v8a`.
+armeabi-v7a 仍属实验性质，原因是上游 V8 存在交叉编译缺陷。详情见 [nodejs/node#58975](https://github.com/nodejs/node/issues/58975)。该分支的失败不会影响 arm64-v8a 的构建结果。
 
 ---
 
-## Rilis terbaru
+## 最新发布
 
-| Run | Tanggal | Branch | Trigger | ABI | Rilis |
+| 构建编号 | 日期 | 分支 | 触发方式 | ABI | 发布链接 |
 |---|---|---|---|---|---|
-| 132 | 2026-07-22 | `main` | push | arm64-v8a, armeabi-v7a | [node-android-v26.x--run132](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run132) |
-| 130 | 2026-07-22 | `main` | push | arm64-v8a | [node-android-v26.x--run130](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run130) |
-| 128 | 2026-07-20 | `main` | push | arm64-v8a | [Run #29729197643](https://github.com/Towartz/nodejs-arm/actions/runs/29729197643) |
+| 132 | 2026-07-22 | main | push | arm64-v8a, armeabi-v7a | [node-android-v26.x--run132](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run132) |
+| 130 | 2026-07-22 | main | push | arm64-v8a | [node-android-v26.x--run130](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run130) |
+| 128 | 2026-07-20 | main | push | arm64-v8a | [运行 #29729197643](https://github.com/Towartz/nodejs-arm/actions/runs/29729197643) |
 
 ---
 
-## Isi setiap rilis
+## 发布包内容
 
-Setiap ABI mendapat satu file zip. Isinya:
+每个 ABI 对应一个压缩包，内容如下。
 
-| File dalam zip | Fungsi |
+| 压缩包内文件 | 作用 |
 |---|---|
-| `node` | Binary CLI, statis penuh, di-strip, PIE, siap jalan langsung |
-| `libc++_shared.so` | Salinan libc++ dari NDK, dipakai saat kamu build native addon |
-| `include/node/*.h` | Header Node, V8, dan libuv, plus `config.gypi`, untuk kompilasi addon N-API |
+| node | 命令行二进制文件，完全静态、已剥离符号、PIE，可直接运行 |
+| libc++_shared.so | NDK 自带的 libc++ 副本，用于编译原生插件时使用 |
+| include/node/*.h | Node、V8、libuv 的头文件，加上 config.gypi，用于编译 N-API 插件 |
 
-Tidak ada `libnode.so` di paket ini. Binary `node` sudah statis penuh. Kalau aplikasi Android kamu perlu load lewat `System.loadLibrary()`, ganti nama file itu sendiri ke format `lib*.so`.
+此发布包不包含 libnode.so，node 二进制文件本身已是完全静态。如果你的 Android 应用需要通过 System.loadLibrary() 加载，请自行将文件重命名为 lib*.so 格式。
 
-### Nama library kustom
+### 自定义库名称
 
-Set input `lib_name` di workflow, misalnya `aurora`. Hasilnya jadi `aurora-android-<abi>.zip` dengan header yang sudah menyesuaikan.
+在工作流输入中设置 lib_name，例如 aurora，生成结果会变成 aurora-android-<abi>.zip，对应头文件也会同步调整。
 
 ---
 
-## Profil build
+## 构建模式
 
-| Profil | Flag tambahan | Kapan pakai |
+| 模式 | 附加编译选项 | 适用场景 |
 |---|---|---|
-| `balanced` | JIT + `-O3` | Default. Kecepatan runtime terbaik. |
-| `speed` | + LTO | 5-15% lebih cepat, waktu build 2x lebih lama. |
-| `size` | + v8-lite-mode | RAM lebih hemat, crypto dan JS 2-3x lebih lambat. |
+| balanced | JIT + -O3 | 默认模式，运行速度最佳 |
+| speed | 追加 LTO | 速度提升 5% 到 15%，构建时间延长约一倍 |
+| size | 追加 v8-lite-mode | 更省内存，加密和 JS 运算速度降低 2 到 3 倍 |
 
 ---
 
-## Toolchain
+## 工具链
 
-| Komponen | Versi | Catatan |
+| 组件 | 版本 | 说明 |
 |---|---|---|
-| NDK | r29 | Clang 21. Lompat dari r27d (Clang 18) per 2026-07-22. |
-| Host runner | ubuntu-24.04 | Wajib untuk GCC 13.2+, syarat V8 versi ini. |
-| API target minimum | android-24 | Android 7.0 ke atas. Jangan turunkan di bawah ini untuk Node v24+. |
+| NDK | r29 | Clang 21。2026-07-22 从 r27d（Clang 18）升级而来 |
+| 构建主机 | ubuntu-24.04 | 此版本 V8 要求 GCC 13.2 以上，必须使用此系统 |
+| 最低目标 API | android-24 | 对应 Android 7.0 及以上。Node v24 以上版本不可低于此值 |
 
-### Flag build penting
+### 关键编译参数
 
-- `-static-libstdc++`: binary jalan sendiri, tidak butuh `libc++_shared.so` di device.
-- `-Wl,-z,max-page-size=16384`: kompatibel dengan page size 16 KB di Android 15/16.
-- `-rdynamic` dan `--export-dynamic`: semua simbol tetap terlihat untuk native addon.
-- `--openssl-no-asm`: mematikan optimisasi assembly OpenSSL untuk cross-compile. Lihat bagian Patch di bawah untuk alasannya.
-
----
-
-## Patch yang diterapkan
-
-Android bukan target resmi yang didukung Node.js. Patch berikut dipakai untuk cross-compile berhasil, dan perlu ditinjau ulang tiap kali Node naik versi major:
-
-- Stack trace, trap handler, dan `uv.gyp` untuk libuv di Android.
-- Polyfill `std::atomic_ref` karena libc++ NDK belum mengimplementasikannya.
-- Perbaikan `zlib` cpu_features, ganti `android_getCpuFeatures()` dengan `getauxval()`.
-- Downgrade `consteval` ke `constexpr` di regexp bytecode, workaround bug Clang lama.
-- Perbaikan CRTP di Turboshaft assembler untuk lookup dua fase C++20.
-- Perbaikan `decltype` di wrappers-inl.h untuk kompatibilitas Clang NDK.
-- Nonaktifkan jalur simdutf atomic, karena tidak tersedia di libc++ Android.
-- Perbaikan target asm OpenSSL, supaya build ARM tidak salah pakai asm x86_64.
-
-Referensi upstream:
-
-- [nodejs/node#57748](https://github.com/nodejs/node/pull/57748), patch Android dari Termux.
-- [nodejs/node#58505](https://github.com/nodejs/node/issues/58505), kegagalan test Android.
-- [nodejs/node#58975](https://github.com/nodejs/node/issues/58975), bug V8 cross-build 32-bit arm.
+- `-static-libstdc++`：二进制文件独立运行，设备端无需 libc++_shared.so
+- `-Wl,-z,max-page-size=16384`：兼容 Android 15/16 的 16KB 页面大小
+- `-rdynamic` 与 `--export-dynamic`：保留所有符号，供原生插件调用
+- `--openssl-no-asm`：交叉编译时关闭 OpenSSL 汇编优化，具体原因见下方补丁说明
 
 ---
 
-## Cara pakai
+## 已应用的补丁
 
-Jalankan lewat tab Actions, pilih workflow Node.js for Android (ARM), lalu klik Run workflow. Kamu bisa atur versi Node, nama library, dan profil build.
+Android 并非 Node.js 官方支持的目标平台。以下补丁用于确保交叉编译成功，每次 Node 主版本升级都需要重新检查。
 
-Push ke branch `main` juga memicu build otomatis. Hasilnya langsung naik ke GitHub Release dengan tag `node-android-*`.
+- 修复 libuv 在 Android 上的堆栈跟踪、trap handler 与 uv.gyp 配置
+- 为 std::atomic_ref 添加兼容实现，因 NDK 的 libc++ 尚未支持该特性
+- 修复 zlib 的 cpu_features 检测，用 getauxval() 替换 android_getCpuFeatures()
+- 将 regexp bytecode 中的 consteval 降级为 constexpr，规避旧版 Clang 的编译器缺陷
+- 修复 Turboshaft assembler 中的 CRTP 写法，适配 C++20 两阶段名称查找
+- 修复 wrappers-inl.h 中的 decltype 用法，兼容 NDK 版本的 Clang
+- 关闭 simdutf 的 atomic 相关代码路径，因 Android 的 libc++ 不支持该特性
+- 修复 OpenSSL 汇编目标选择逻辑，避免 ARM 构建误用 x86_64 汇编代码
+
+上游相关链接：
+
+- [nodejs/node#57748](https://github.com/nodejs/node/pull/57748)，来自 Termux 项目的 Android 补丁
+- [nodejs/node#58505](https://github.com/nodejs/node/issues/58505)，Android 测试失败记录
+- [nodejs/node#58975](https://github.com/nodejs/node/issues/58975)，32 位 arm 交叉编译中的 V8 缺陷
 
 ---
 
-## Branch yang tersedia
+## 使用方法
 
-| Branch | Versi Node | NDK | Ubuntu | Status |
+打开 Actions 标签页，选择 Node.js for Android (ARM) 工作流，点击 Run workflow。你可以在这里设置 Node 版本、库名称和构建模式。
+
+推送到 main 分支同样会自动触发构建，构建完成后会自动发布到 GitHub Release，标签格式为 node-android-*。
+
+---
+
+## 可用分支
+
+| 分支 | Node 版本 | NDK | Ubuntu | 状态 |
 |---|---|---|---|---|
-| `main` | v26.x | r29 | 24.04 | CI aktif |
-| `v24.x-lts` | v24.x LTS | r29 | 24.04 | Terverifikasi |
+| main | v26.x | r29 | 24.04 | CI 正常运行 |
+| v24.x-lts | v24.x LTS | r29 | 24.04 | 已验证 |
 
 ---
 
-## Lisensi
+## 许可证
 
-GPLv3 dengan tambahan pembatasan. Detail lengkap ada di file LICENSE.
+GPLv3 附加限制条款，完整内容见 LICENSE 文件。
 
-Dibangun oleh [21_whiten (Towartz)](https://github.com/Towartz).
+由 [21_whiten (Towartz)](https://github.com/Towartz) 构建。
