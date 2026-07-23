@@ -1,122 +1,122 @@
 <div align="center">
 
-# Node.js for Android ARM — **v24.x LTS**
+# Node.js for Android (ARM) — v24.x LTS 分支
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=v24.x-lts&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
-[![Last build](https://img.shields.io/badge/last%20build-%23137%20(Jul%2022)-success)](https://github.com/Towartz/nodejs-arm/actions/runs/29913681810)
 [![Latest release](https://img.shields.io/badge/latest%20release-v24.x--run117-blue?logo=github)](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run117)
-[![NDK](https://img.shields.io/badge/NDK-r29(Clang%2019)-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
-[![Node](https://img.shields.io/badge/Node-v24.x(LTS)-339933?logo=nodedotjs)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-v24.x%20LTS-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
-[![Views](https://hits.sh/github.com/Towartz/nodejs-arm.svg?label=views&color=555)](https://hits.sh/github.com/Towartz/nodejs-arm/)
 
-**v24.x LTS** — **✅ Verified** — Cross-compiled standalone static `node` CLI for Android ARM64 / ARM32 via GitHub Actions.
+通过 GitHub Actions 交叉编译的 Android ARM 独立 node 命令行程序，本分支对应 Node.js v24.x LTS 版本。
 
-Statically linked against libc++ (zero external dependencies), bundled with `libc++_shared.so` for native N-API addon builds and `*-headers.zip` per ABI for compiling addons against the exact build config.
+二进制文件完全静态链接 libc++，不依赖任何外部库。每个发布包都包含二进制文件、用于编译原生插件的 libc++_shared.so，以及完整的 N-API 编译头文件。
 
 </div>
 
 ---
 
-## Status
+## 构建状态
 
-| ABI | Balanced (JIT + `-O3`) | Speed (LTO) | Size (V8 lite-mode) |
-|-----|------------------------|-------------|---------------------|
-| `arm64-v8a` | ✅ Verified | ✅ Verified | ✅ Verified |
-| `armeabi-v7a` | ⚠️ Experimental | ⚠️ Experimental | ⚠️ Experimental |
+| ABI | 均衡模式 (JIT + -O3) | 速度模式 (LTO) | 体积模式 (V8 精简模式) |
+|---|---|---|---|
+| arm64-v8a | 已验证 | 已验证 | 已验证 |
+| armeabi-v7a | 实验性 | 实验性 | 实验性 |
 
-> `armeabi-v7a`: experimental — V8 cross-build bugs ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975))
-
----
-
-## Latest Builds
-
-| # | Date | Branch | Event | ABI | Release |
-|---|------|--------|-------|-----|---------|
-| 117 | 2026-07-20 | `v24.x-lts` | `push` | `arm64-v8a` | [`node-android-v24.x--run117`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run117) |
-| 114 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`node-android-v24.x--run114`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run114) |
-| 108 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`node-android-v24.x--run108`](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run108) |
-| 107 | 2026-07-19 | `v24.x-lts` | `workflow_dispatch` | `arm64-v8a` | [`aurora_node-android-v24.x--run107`](https://github.com/Towartz/nodejs-arm/releases/tag/aurora_node-android-v24.x--run107) |
+armeabi-v7a 仍属实验性质，原因是上游 V8 存在交叉编译缺陷。详情见 [nodejs/node#58975](https://github.com/nodejs/node/issues/58975)。
 
 ---
 
-## What you get
+## 最新发布
 
-Each build produces one release per successful run, with **raw files** (not double-packed — GitHub already wraps each artifact in a `.zip`):
-
-| File | Description |
-|------|-------------|
-| `<lib_name>-android-<abi>` | Standalone, fully static `node` CLI binary (PIE, stripped, `-rdynamic`, `-static-libstdc++`, max-page-size=16K) |
-| `<lib_name>-android-<abi>-libc++_shared.so` | NDK's `libc++_shared.so` bundled for native-addon builds (node itself does **not** depend on it) |
-| `<lib_name>-android-<abi>-headers.zip` | Node public headers + V8/libuv includes + `config.gypi` — for compiling N-API addons against this build |
-
-> **Note:** No `libnode.so` — the binary is a fully self-contained static ELF. Rename it to `lib*.so` yourself if your Android app needs to `System.loadLibrary()` it with exec permissions.
-
-### Custom library name
-
-Set `lib_name` workflow input to `aurora` → produces `aurora-android-<abi>` with matching headers.
+| 构建编号 | 日期 | 分支 | 触发方式 | ABI | 发布链接 |
+|---|---|---|---|---|---|
+| 117 | 2026-07-20 | v24.x-lts | push | arm64-v8a | [node-android-v24.x--run117](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run117) |
+| 114 | 2026-07-19 | v24.x-lts | workflow_dispatch | arm64-v8a | [node-android-v24.x--run114](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run114) |
+| 108 | 2026-07-19 | v24.x-lts | workflow_dispatch | arm64-v8a | [node-android-v24.x--run108](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v24.x--run108) |
+| 107 | 2026-07-19 | v24.x-lts | workflow_dispatch | arm64-v8a | [aurora_node-android-v24.x--run107](https://github.com/Towartz/nodejs-arm/releases/tag/aurora_node-android-v24.x--run107) |
 
 ---
 
-## Build profiles
+## 发布包内容
 
-| Profile | Flags | When to use |
-|---------|-------|-------------|
-| `balanced` | JIT + `-O3` | Best runtime speed (default) |
-| `speed` | `+LTO` | ~5–15% faster output, ~2× longer build |
-| `size` | `+v8-lite-mode` | Lower peak RAM, 2–3× slower crypto/JS |
+每个 ABI 对应一个压缩包，内容如下。
 
----
+| 压缩包内文件 | 作用 |
+|---|---|
+| node | 命令行二进制文件，完全静态、已剥离符号、PIE，可直接运行 |
+| libc++_shared.so | NDK 自带的 libc++ 副本，用于编译原生插件时使用 |
+| include/node/*.h | Node、V8、libuv 的头文件，加上 config.gypi，用于编译 N-API 插件 |
 
-## Toolchain
+此发布包不包含 libnode.so，node 二进制文件本身已是完全静态。如果你的 Android 应用需要通过 System.loadLibrary() 加载，请自行将文件重命名为 lib*.so 格式。
 
-| Component | Version | Notes |
-|-----------|---------|-------|
-| NDK | `r29` | Clang 19 — tracking latest stable |
-| Host | `ubuntu-24.04` | Pinned for toolchain ABI stability |
-| Target API | `android-24` | Minimum API 24 (Android 7.0+) |
+### 自定义库名称
 
-### Key build flags
-
-- `-static-libstdc++` — fully standalone binary, no runtime dep on device's libc++
-- `-Wl,-z,max-page-size=16384` — Android 15/16 compatibility
-- `-rdynamic` / `--export-dynamic` — all symbols visible for native addons
-- `--openssl-no-asm` — disable OpenSSL assembly (avoids arch/OS mismatch in cross-compile)
+在工作流输入中设置 lib_name，例如 aurora，生成结果会变成 aurora-android-<abi>.zip，对应头文件也会同步调整。
 
 ---
 
-## Patches
+## 构建模式
 
-This workflow applies community-maintained patches for Android cross-compilation. Tracked upstream at:
-
-- [nodejs/node#57748](https://github.com/nodejs/node/pull/57748) — Termux Android build patches
-- [nodejs/node#58505](https://github.com/nodejs/node/issues/58505) — Android test failures
-- [nodejs/node#58975](https://github.com/nodejs/node/issues/58975) — 32-bit arm cross-build V8 bugs
-
-Patches cover: V8 stack tracing, trap handler, zlib cpu_features, `std::atomic_ref` polyfill, uv.gyp toolset fix, FICLONE removal, SMI assertion relaxation, turboshaft CRTP `consteval`→`constexpr` downgrade, OpenSSL `asm_target` detection for Android.
+| 模式 | 附加编译选项 | 适用场景 |
+|---|---|---|
+| balanced | JIT + -O3 | 默认模式，运行速度最佳 |
+| speed | 追加 LTO | 速度提升 5% 到 15%，构建时间延长约一倍 |
+| size | 追加 v8-lite-mode | 更省内存，加密和 JS 运算速度降低 2 到 3 倍 |
 
 ---
 
-## Usage
+## 工具链
 
-Trigger a build via **Actions** → **Node.js for Android (ARM)** → **Run workflow**.
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| NDK | r29 | 跟随最新稳定版 |
+| 构建主机 | ubuntu-24.04 | 固定版本，保证工具链行为一致 |
+| 最低目标 API | android-24 | 对应 Android 7.0 及以上 |
 
-On `push` to `v24.x-lts`, builds run automatically. Artifacts are promoted to a **GitHub Release** with a `node-android-*` tag.
+### 关键编译参数
+
+- `-static-libstdc++`：二进制文件独立运行，设备端无需 libc++_shared.so
+- `-Wl,-z,max-page-size=16384`：兼容 Android 15/16 的 16KB 页面大小
+- `-rdynamic` 与 `--export-dynamic`：保留所有符号，供原生插件调用
+- `--openssl-no-asm`：交叉编译时关闭 OpenSSL 汇编优化，避免架构不匹配问题
 
 ---
 
-## Branches
+## 已应用的补丁
 
-| Branch | Node.js | NDK | Ubuntu | Status |
-|--------|---------|-----|--------|--------|
-| **`main`** | **v26.x** | **r29** | **24.04** | **✅ CI passing** |
-| **`v24.x-lts`** | **v24.x LTS** | **r29** | **24.04** | **✅ Verified** |
+Android 并非 Node.js 官方支持的目标平台。以下补丁用于确保交叉编译成功。
+
+补丁涵盖内容：V8 堆栈跟踪、trap handler、zlib cpu_features 检测、std::atomic_ref 兼容实现、uv.gyp 工具集修复、FICLONE 移除、SMI 断言放宽、Turboshaft CRTP 的 consteval 降级为 constexpr、OpenSSL 汇编目标检测适配 Android。
+
+上游相关链接：
+
+- [nodejs/node#57748](https://github.com/nodejs/node/pull/57748)，来自 Termux 项目的 Android 补丁
+- [nodejs/node#58505](https://github.com/nodejs/node/issues/58505)，Android 测试失败记录
+- [nodejs/node#58975](https://github.com/nodejs/node/issues/58975)，32 位 arm 交叉编译中的 V8 缺陷
 
 ---
 
-## License
+## 使用方法
 
-[GPLv3 with Additional Restrictions](LICENSE)
+打开 Actions 标签页，选择 Node.js for Android (ARM) 工作流，点击 Run workflow。
 
-Built by [**21_whiten** (Towartz)](https://github.com/Towartz) — 140+ repos, 32 followers, since 2021.
+推送到 v24.x-lts 分支会自动触发构建，构建完成后会自动发布到 GitHub Release，标签格式为 node-android-*。
+
+---
+
+## 可用分支
+
+| 分支 | Node 版本 | NDK | Ubuntu | 状态 |
+|---|---|---|---|---|
+| main | v26.x | r29 | 24.04 | CI 正常运行 |
+| v24.x-lts | v24.x LTS | r29 | 24.04 | 已验证 |
+
+---
+
+## 许可证
+
+GPLv3 附加限制条款，完整内容见 LICENSE 文件。
+
+由 [21_whiten (Towartz)](https://github.com/Towartz) 构建。
