@@ -2,8 +2,8 @@
 
 # Node.js for Android (ARM)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions
-[![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?label=latest%20release&logo=github&color=blue)](https://github.com/Towartz/nodejs-arm/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
+[![Latest release](https://img.shields.io/badge/latest%20release-v26.x--run150-blue?logo=github)](https://github.com/Towartz/nodejs-arm/releases/tag/node-android-v26.x--run150)
 [![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v26.x-339933?logo=nodedotjs)](https://nodejs.org)
