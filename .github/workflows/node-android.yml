@@ -244,6 +244,90 @@ jobs:
       - name: Clone Node.js (${{ env.NODE_REF }})
         run: git clone --depth 1 --branch "$NODE_REF" https://github.com/nodejs/node.git node
 
+      # ---------- 3a. Resolve actual Node.js version ----------
+      # NODE_REF (from the node_version input, e.g. "v24.x") is just the git
+      # ref that was asked for — the workflow_dispatch dropdown offers
+      # v26.x/v24.x, which are MOVING branches, not fixed tags (confirmed
+      # against nodejs/node: refs/heads/v26.x and refs/heads/v24.x both
+      # exist and advance as releases land on them). So NODE_REF alone
+      # never tells you which actual Node.js version — 24.17.0? 24.18.1? —
+      # ended up in this specific build; it's the same literal string
+      # every run regardless of what the branch pointed to that day. That
+      # made every artifact filename and release title equally vague
+      # regardless of when the workflow ran.
+      #
+      # Fix: read the version macros Node.js itself embeds in
+      # src/node_version.h — NODE_MAJOR_VERSION / NODE_MINOR_VERSION /
+      # NODE_PATCH_VERSION / NODE_VERSION_IS_RELEASE — right after clone,
+      # so this reflects whatever commit was ACTUALLY checked out this
+      # run, regardless of whether NODE_REF was a moving branch, a fixed
+      # tag, or an arbitrary custom_ref/SHA. Verified directly against
+      # nodejs/node: cloning branch v24.x today resolves to 24.18.1
+      # (commit 9de263aa88, NODE_VERSION_IS_RELEASE=0 — i.e. this exact
+      # commit isn't itself a tagged release, just where the release
+      # branch currently sits); cloning the tag v24.10.0 resolves to
+      # 24.10.0 with NODE_VERSION_IS_RELEASE=1. The -dev suffix below
+      # distinguishes those two cases so a build off a moving branch is
+      # never confused for an official tagged release.
+      #
+      # RESOLVED_NODE_VERSION / NODE_COMMIT_SHORT are consumed by the
+      # artifact-naming steps in section 6a/6b and the release job further
+      # below (which re-derives them from the downloaded artifact
+      # folder's own name rather than plumbing GITHUB_ENV across
+      # jobs/matrix legs — see the release job's "Resolve inputs" step for
+      # why).
+      - name: Resolve actual Node.js version
+        working-directory: node
+        run: |
+          python3 - <<'PYEOF'
+          import re
+          import pathlib
+          import subprocess
+          import os
+
+          vh_path = pathlib.Path('src/node_version.h')
+          vh = vh_path.read_text()
+
+          def grab(name):
+              m = re.search(rf'#define\s+{name}\s+(\S+)', vh)
+              if not m:
+                  print(f"::error::could not find {name} in {vh_path}")
+                  raise SystemExit(1)
+              return m.group(1)
+
+          major = grab('NODE_MAJOR_VERSION')
+          minor = grab('NODE_MINOR_VERSION')
+          patch = grab('NODE_PATCH_VERSION')
+          is_release = grab('NODE_VERSION_IS_RELEASE')
+
+          version = f"{major}.{minor}.{patch}"
+          if is_release != "1":
+              version += "-dev"
+
+          sha_full = subprocess.check_output(
+              ['git', 'rev-parse', 'HEAD'], text=True
+          ).strip()
+          sha_short = sha_full[:10]
+
+          # Sanity check: version must be a plain dotted-numeric triple
+          # (optionally -dev), since it flows straight into filenames —
+          # never trust an upstream macro format silently enough to skip
+          # this before it becomes part of a path GitHub uploads.
+          if not re.fullmatch(r'\d+\.\d+\.\d+(-dev)?', version):
+              print(f"::error::resolved version '{version}' failed sanity check")
+              raise SystemExit(1)
+
+          gh_env = os.environ['GITHUB_ENV']
+          with open(gh_env, 'a') as f:
+              f.write(f"RESOLVED_NODE_VERSION={version}\n")
+              f.write(f"NODE_COMMIT_SHA={sha_full}\n")
+              f.write(f"NODE_COMMIT_SHORT={sha_short}\n")
+
+          print(f"Requested ref:     {os.environ.get('NODE_REF', '(unset)')}")
+          print(f"Resolved version:  {version}")
+          print(f"Commit:            {sha_full}")
+          PYEOF
+
       # ---------- 3b. Patch known Android cross-build issues ----------
       # Android is not an officially tested/supported Node.js target (core team
       # position, see nodejs/node#58505) — these are community-tracked issues
@@ -834,11 +918,11 @@ jobs:
           # fi
           #
           # if "$TC/bin/llvm-readelf" -d node | grep -q 'NEEDED.*libc++_shared'; then
-          #   tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node libc++_shared.so
-          #   ls -lh node libc++_shared.so "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          #   tar czf "../${LIB_NAME}-v${RESOLVED_NODE_VERSION}-android-${{ matrix.abi }}.tar.gz" node libc++_shared.so
+          #   ls -lh node libc++_shared.so "../${LIB_NAME}-v${RESOLVED_NODE_VERSION}-android-${{ matrix.abi }}.tar.gz"
           # else
-          #   tar czf "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz" node
-          #   ls -lh node "../${LIB_NAME}-android-${{ matrix.abi }}.tar.gz"
+          #   tar czf "../${LIB_NAME}-v${RESOLVED_NODE_VERSION}-android-${{ matrix.abi }}.tar.gz" node
+          #   ls -lh node "../${LIB_NAME}-v${RESOLVED_NODE_VERSION}-android-${{ matrix.abi }}.tar.gz"
           # fi
           # ============================================================
 
@@ -866,11 +950,17 @@ jobs:
       # for anyone downloading from the Actions UI. node and libc++_shared.so
       # live at node/node and node/libc++_shared.so (working-directory: node
       # was used two steps up), relative to the repo root this step runs in.
+      # The artifact `name:` (not the physical file path above) is what
+      # embeds RESOLVED_NODE_VERSION (set in section 3a) — the physical
+      # files stay named `node`/`libc++_shared.so` on disk; the version
+      # only needs to appear in the GitHub artifact name, which is also
+      # what "Assemble release archives" in the release job reads back to
+      # name the final .tar.gz.
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}
+          name: ${{ env.LIB_NAME }}-v${{ env.RESOLVED_NODE_VERSION }}-android-${{ matrix.abi }}
           path: |
             node/node
             node/libc++_shared.so
@@ -886,7 +976,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.LIB_NAME }}-android-${{ matrix.abi }}-headers
+          name: ${{ env.LIB_NAME }}-v${{ env.RESOLVED_NODE_VERSION }}-android-${{ matrix.abi }}-headers
           path: node/node-headers/include
           retention-days: 14
 
@@ -930,12 +1020,47 @@ jobs:
       - name: Download all ABI artifacts
         uses: actions/download-artifact@v6
         with:
-          pattern: ${{ env.LIB_NAME }}-android-*
+          # Wildcard now sits between LIB_NAME and "android" too, not just
+          # at the end — build-job artifact names changed from
+          # "${LIB_NAME}-android-<abi>" to
+          # "${LIB_NAME}-v<resolved-version>-android-<abi>" (see section 3a
+          # and 6a/6b in the build job) so a version is visible in the
+          # artifact name itself. actions/download-artifact's `pattern`
+          # uses Minimatch, which matches `*` anywhere in the string, not
+          # only as a trailing glob, so this still matches every ABI/
+          # headers artifact regardless of which resolved version ended up
+          # in the name.
+          pattern: ${{ env.LIB_NAME }}-v*-android-*
           path: dist
           if-no-artifact-found: warn
 
       - name: List downloaded artifacts
         run: ls -lhR dist || echo "::warning::no artifacts downloaded — did every matrix leg fail?"
+
+      # ---------- Parse resolved Node.js version back out of artifact folder names ----------
+      # This job never clones Node.js itself (it only downloads finished
+      # artifacts from the build job), so it has no direct access to
+      # src/node_version.h to resolve the version the way section 3a does
+      # in the build job. Rather than plumb RESOLVED_NODE_VERSION across
+      # jobs/matrix legs (the existing comment above already explains why
+      # merge-multiple stays false for this exact race-condition-adjacent
+      # reason with matrix legs), parse it back out of a downloaded
+      # artifact's own folder name — merge-multiple: false means each
+      # artifact lands in dist/<artifact-name>/, and that name is exactly
+      # what the build job's Upload artifact step set, version and all —
+      # so this is just reading it back rather than re-deriving it from
+      # scratch.
+      - name: Parse resolved Node.js version from artifact folder names
+        run: |
+          SAMPLE="$(ls dist | grep -m1 -E "^${LIB_NAME}-v[0-9]+\.[0-9]+\.[0-9]+(-dev)?-android-" || true)"
+          if [ -z "$SAMPLE" ]; then
+            echo "::warning::no artifact folder name matched the expected version pattern — falling back to NODE_REF for release notes"
+            echo "RESOLVED_NODE_VERSION=${NODE_REF}" >> "$GITHUB_ENV"
+          else
+            VERSION="$(echo "$SAMPLE" | sed -E "s/^${LIB_NAME}-v([0-9]+\.[0-9]+\.[0-9]+(-dev)?)-android-.*/\1/")"
+            echo "RESOLVED_NODE_VERSION=${VERSION}" >> "$GITHUB_ENV"
+            echo "Resolved Node.js version from artifact: $VERSION"
+          fi
 
       # This is the only place any archive gets made for actual distribution
       # — once, here. The build job intentionally uploads raw files/folders
@@ -959,7 +1084,13 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: "${{ env.LIB_NAME }} — Node ${{ env.NODE_REF }} for Android (build #${{ github.run_number }})"
+          # Title now leads with the resolved version (e.g. "24.18.1-dev")
+          # instead of echoing NODE_REF (e.g. "v24.x") verbatim — NODE_REF
+          # is a moving branch on the default dropdown choices, so it never
+          # told you which actual release ended up in this build. See
+          # section 3a in the build job and the version-parsing step above
+          # for where RESOLVED_NODE_VERSION comes from.
+          name: "${{ env.LIB_NAME }} — Node ${{ env.RESOLVED_NODE_VERSION }} for Android (build #${{ github.run_number }})"
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           body: |
@@ -967,16 +1098,27 @@ jobs:
 
             | | |
             |---|---|
-            | Node.js ref | `${{ env.NODE_REF }}` |
+            | Node.js version | `${{ env.RESOLVED_NODE_VERSION }}` |
+            | Requested ref | `${{ env.NODE_REF }}` |
             | Artifact label | `${{ env.LIB_NAME }}` |
             | Build profile | `${{ inputs.profile || 'balanced' }}` |
             | NDK version | `${{ env.NDK_VERSION }}` |
             | Trigger | `${{ github.event_name }}` |
             | Commit | `${{ github.sha }}` |
 
+            "Requested ref" is the branch/tag/custom ref that was asked for
+            (e.g. `v24.x`, which is a moving branch, not a fixed version) —
+            "Node.js version" above is what that ref actually resolved to
+            for this specific build, read from src/node_version.h right
+            after clone. A `-dev` suffix means this commit is not itself a
+            tagged Node.js release, just wherever its release branch
+            currently sits. Both the release title and every asset filename
+            below carry this resolved version, not the requested ref.
+
             arm64-v8a is always included when the build succeeds; armeabi-v7a
             is experimental and only present below if that leg also succeeded.
-            Each ABI's tar.gz contains two files:
+            Each `${{ env.LIB_NAME }}-v${{ env.RESOLVED_NODE_VERSION }}-android-<abi>.tar.gz`
+            contains two files:
             - `node` — single ELF, PIE, fully static (no NEEDED libc++_shared.so),
               all symbols exported via -rdynamic/--export-dynamic. Rename it to
               lib*.so yourself downstream if your app needs Android to extract
@@ -984,8 +1126,10 @@ jobs:
             - `libc++_shared.so` — bundled alongside for native N-API addons
               that dlopen it at runtime. node itself does not load this file.
 
-            Each ABI also ships a `*-headers.zip` (Node.js includes +
-            `config.gypi`) for compiling native N-API addons against that
-            specific build. Use the headers matching the target ABI —
-            `config.gypi` differs between arm64-v8a and armeabi-v7a.
+            Each ABI also ships a
+            `${{ env.LIB_NAME }}-v${{ env.RESOLVED_NODE_VERSION }}-android-<abi>-headers.zip`
+            (Node.js includes + `config.gypi`) for compiling native N-API
+            addons against that specific build. Use the headers matching
+            the target ABI — `config.gypi` differs between arm64-v8a and
+            armeabi-v7a.
           files: release-assets/*
