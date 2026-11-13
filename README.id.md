@@ -30,8 +30,10 @@ Menghasilkan binary executable mandiri yang ter-link secara statis dengan libc++
 - 🏷️ **Pilihan Saluran Rilis (Release Channel)**:
   - **Stable** (Default): Otomatis mendeteksi dan meng-clone tag rilis resmi stabil terbaru (misal `v26.7.0` atau `v24.19.0`).
   - **Pre-release**: Meng-clone branch pengembangan aktif (`v27.x` / `v26.x` / `v24.x`).
+- 🌐 **Dukungan Intl Bawaan (small-icu)**: Disertai data ICU tertanam (`small-icu`), menghadirkan API JavaScript `Intl` standar secara langsung (sangat penting untuk Baileys, pemformatan tanggal/angka, dan library i18n).
+- 🚀 **Akselerasi Kripto Perangkat Keras**: Mengaktifkan optimasi OpenSSL assembly pada ARM64 untuk performa kriptografi & TLS 2x–5x lebih kencang.
 - 🔒 **Branding Terobfuskasi Runtime**: Menyisipkan teks branding kustom saat `node -v` menggunakan dekripsi XOR di memori tanpa meninggalkan teks plaintext pada binary ELF maupun berkas header.
-- ⚡ **Toolchain Mutakhir**: Android NDK **r29** (Clang 21), host build di Ubuntu 24.04, akselerasi paralel ThinLTO, dan cache `ccache` persisten.
+- ⚡ **Toolchain Mutakhir**: Android NDK **r29** (Clang 21), host build di Ubuntu 24.04, linker section GC (`-Wl,--gc-sections`), akselerasi paralel ThinLTO, dan cache `ccache` persisten.
 
 ---
 

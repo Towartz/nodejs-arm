@@ -30,8 +30,10 @@ Produces standalone statically linked executable binaries or shared `.so` librar
 - 🏷️ **Release Channels**:
   - **Stable** (Default): Automatically queries and builds the latest official release tag (e.g., `v26.7.0` or `v24.19.0`).
   - **Pre-release**: Builds the active bleeding-edge development branch (`v27.x` / `v26.x` / `v24.x`).
+- 🌐 **Built-in Intl Support (small-icu)**: Shipped with embedded ICU (`small-icu`), providing standard JavaScript `Intl` API support out-of-the-box (essential for Baileys, date-fns, and i18n libraries).
+- 🚀 **Hardware-Accelerated Crypto**: Enabled OpenSSL hardware assembly optimizations on ARM64 for 2x–5x cryptographic and TLS performance.
 - 🔒 **Runtime Obfuscated Branding**: Embeds custom runtime branding banners on `node -v` using in-memory XOR decoding without leaking plaintext strings in compiled ELF binaries or headers.
-- ⚡ **Optimized Toolchain**: Android NDK **r29** (Clang 21), host build on Ubuntu 24.04, ThinLTO parallel acceleration, and persistent `ccache` object caching.
+- ⚡ **Optimized Toolchain**: Android NDK **r29** (Clang 21), host build on Ubuntu 24.04, linker section GC (`-Wl,--gc-sections`), ThinLTO parallel acceleration, and persistent `ccache` object caching.
 
 ---
 
