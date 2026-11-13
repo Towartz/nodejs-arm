@@ -576,9 +576,16 @@ jobs:
                 '    std::atomic_ref<T>(destination[i]).store(value, std::memory_order_relaxed);',
                 '    __atomic_store_n(&destination[i], value, __ATOMIC_RELAXED);')
 
-          patch('deps/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc',
-                '    wasm::SimdShuffle::ShuffleArray shuffle_bytes;',
-                '    wasm::SimdShuffle::ShuffleArray<kSimd128Size> shuffle_bytes;')
+          p_wsr = pathlib.Path('deps/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc')
+          if p_wsr.exists():
+              import re
+              wsr_s = p_wsr.read_text()
+              new_wsr_s = re.sub(r'(\bSimdShuffle::ShuffleArray)\b(?!\s*<)', r'\1<kSimd128Size>', wsr_s)
+              if new_wsr_s != wsr_s:
+                  p_wsr.write_text(new_wsr_s)
+                  print("patched wasm-shuffle-reducer.cc (ShuffleArray<kSimd128Size>)")
+              else:
+                  print("wasm-shuffle-reducer.cc: no un-templated ShuffleArray found")
           PYEOF
 
       - name: "Patch V8: consteval/immediate-escalation clang bug in regexp bytecode dispatch"
@@ -1806,7 +1813,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build
-    if: success()
+    if: "!cancelled() && !contains(needs.build.result, 'cancelled') && needs.build.result != 'cancelled'"
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1966,7 +1973,11 @@ jobs:
             name="$(basename "$d")"
             ( cd "$d" && zip -rq "$GITHUB_WORKSPACE/release-assets/${name}.zip" . )
           done
-          ls -lh release-assets || echo "::warning::release-assets is empty — did every matrix leg fail?"
+          ls -lh release-assets
+          if [ -z "$(ls -A release-assets 2>/dev/null)" ]; then
+            echo "::error::No release assets were assembled because no build matrix leg succeeded."
+            exit 1
+          fi
 
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v3
