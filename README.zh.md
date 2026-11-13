@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=最新发布)](https://github.com/Towartz/nodejs-arm/releases)
-[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r30%20(LTS)-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
@@ -33,16 +33,16 @@
 - 🌐 **内置标准 Intl 支持 (small-icu)**：集成内置 ICU 数据 (`small-icu`)，开箱即用支持完整 JavaScript `Intl` API（完美兼容 Baileys、日期时间格式化与国际化库）。
 - 🚀 **硬件加速密码学计算**：在 ARM64 上启用 OpenSSL 汇编指令集优化，加密及 TLS 处理速度提升 2x–5x。
 - 🔒 **运行时混淆版本标识**：在执行 `node -v` 时，通过内存中 XOR 解码显示自定义版本横幅，二进制 ELF 文件与头文件中零明文字符泄露。
-- ⚡ **现代化工具链**：Android NDK **r29** (Clang 21)，Ubuntu 24.04 主机构建，链接器分段回收 (`-Wl,--gc-sections`)，ThinLTO 并行加速，以及持久化 `ccache` 缓存。
+- ⚡ **现代化工具链**：Android NDK **r30** (2026 LTS)，Ubuntu 24.04 主机构建并集成 ninja-build，链接器分段回收 (`-Wl,--gc-sections`)，ThinLTO/Fat-LTO 并行加速，以及持久化 `ccache` 缓存。
 
 ---
 
 ## 📊 架构支持与构建状态
 
-| ABI | 架构 | 均衡模式 (JIT + -O3) | 速度模式 (ThinLTO) | 体积模式 (V8 精简模式) | 状态 |
-|:---|:---|:---:|:---:|:---:|:---:|
-| **arm64-v8a** | 64 位 ARM | ✅ 已验证 | ✅ 已验证 | ✅ 已验证 | 主力 / 生产级 |
-| **armeabi-v7a** | 32 位 ARM | ⚠️ 实验性 | ⚠️ 实验性 | ⚠️ 实验性 | 社区支持 |
+| ABI | 架构 | 均衡模式 (JIT + -O3) | 速度模式 (ThinLTO) | Fat LTO 模式 (完整 LTO) | 体积模式 (V8 精简模式) | 状态 |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| **arm64-v8a** | 64 位 ARM | ✅ 已验证 | ✅ 已验证 | ✅ 已验证 | ✅ 已验证 | 主力 / 生产级 |
+| **armeabi-v7a** | 32 位 ARM | ⚠️ 实验性 | ⚠️ 实验性 | ⚠️ 实验性 | ⚠️ 实验性 | 社区支持 |
 
 > [!NOTE]
 > `armeabi-v7a` 属于尽力支持性质，原因是上游 V8 存在 32 位交叉编译缺陷 ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975))。32 位分支的失败不会影响 64 位 ARM 的发布。
@@ -105,7 +105,7 @@ Android 并非 Node.js 官方核心团队正式支持的目标平台 ([nodejs/no
    - **`release_channel`**：`stable` (正式发布标签) 或 `prerelease` (开发分支)。
    - **`build_mode`**：`standalone` (CLI 可执行文件) 或 `shared` (`.so` 共享库)。
    - **`lib_name`**：自定义名称前缀 (例如 `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`)。
-   - **`profile`**：`balanced`、`speed` (ThinLTO) 或 `size` (V8 Lite)。
+   - **`profile`**：`balanced`、`speed` (ThinLTO)、`fat-lto` (完整 Fat LTO) 或 `size` (V8 Lite)。
 
 任何推送到 `main` 分支的提交也会自动触发构建，并将成果上传至 GitHub Release。
 

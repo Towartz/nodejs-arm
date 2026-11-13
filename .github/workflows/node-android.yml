@@ -40,7 +40,8 @@ on:
         default: 'balanced'
         options:
           - 'balanced'    # JIT + -O3: best runtime speed (Baileys/server use)
-          - 'speed'       # + LTO: faster, much longer build
+          - 'speed'       # + ThinLTO: faster, much longer build
+          - 'fat-lto'     # + Fat/Full LTO: monolithic whole-program optimization
           - 'size'        # + v8-lite-mode: lower RAM, slower JS/crypto
 
 concurrency:
@@ -89,7 +90,7 @@ env:
   # r29 explicitly, and the `-Wl,-z,max-page-size=16384` linker flag (section
   # 4) already covers r28+'s 16 KB page-size default, so neither should need
   # further changes for this bump.
-  NDK_VERSION: 'r29'
+  NDK_VERSION: 'r30'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -243,7 +244,7 @@ jobs:
           echo "CCACHE_COMPRESSLEVEL=1" >> "$GITHUB_ENV"
 
       - name: Cache ccache & ThinLTO directory
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ env.CCACHE_DIR }}
@@ -262,7 +263,7 @@ jobs:
           python3 -c "import sys; v=sys.version_info; assert v>=(3,10), f'need Python>=3.10, got {v}'"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3 g++ make git ca-certificates ccache
+            python3 g++ make ninja-build git ca-certificates ccache
 
       - name: Install 32-bit multilib (armeabi-v7a only)
         if: matrix.dest_cpu == 'arm'
@@ -693,8 +694,11 @@ jobs:
 
       - name: "Patch V8: gyp toolchain + cross-compile config"
         working-directory: node
+        env:
+          PROFILE_CHOICE: ${{ inputs.profile || 'balanced' }}
         run: |
           python3 - <<'PYEOF'
+          import os
           import pathlib
           def patch(path, old, new):
               p = pathlib.Path(path)
@@ -735,9 +739,14 @@ jobs:
                 "            'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],\n"
                 "            'ldflags': [ '-fPIC' ]\n"
                 "          }],", "")
+          profile = os.environ.get('PROFILE_CHOICE', 'balanced')
+          if profile == 'fat-lto':
+              lto_flag = ' -flto=full -ffat-lto-objects '
+          else:
+              lto_flag = ' -flto=thin '
           patch('common.gypi',
                 "'lto': ' -flto ', # Clang",
-                "'lto': ' -flto=thin ', # Clang")
+                f"'lto': '{lto_flag}', # Clang")
           old_lto_block = (
               "          ['enable_lto==\"true\"', {\n"
               "            'cflags': ['<(lto)'],\n"
@@ -1473,6 +1482,10 @@ jobs:
               mkdir -p "$HOME/.cache/thinlto"
               export LDFLAGS="$LDFLAGS -Wl,--thinlto-cache-dir=$HOME/.cache/thinlto -Wl,--thinlto-jobs=2"
               ;;
+            fat-lto)
+              EXTRA_FLAGS="--enable-lto"
+              export LDFLAGS="$LDFLAGS -Wl,-mllvm,-threads=2"
+              ;;
             size)
               EXTRA_FLAGS="--v8-lite-mode"
               ;;
@@ -1867,7 +1880,7 @@ jobs:
       # become one release asset. That's what merge-multiple: false gives
       # for free, with no name-matching logic required afterward.
       - name: Download all ABI artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           # Wildcard sits between LIB_NAME and "android" too, not just at
           # the end — build-job artifact names embed RESOLVED_NODE_VERSION

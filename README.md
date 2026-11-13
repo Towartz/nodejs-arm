@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=latest%20release)](https://github.com/Towartz/nodejs-arm/releases)
-[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r30%20(LTS)-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
@@ -33,16 +33,16 @@ Produces standalone statically linked executable binaries or shared `.so` librar
 - 🌐 **Built-in Intl Support (small-icu)**: Shipped with embedded ICU (`small-icu`), providing standard JavaScript `Intl` API support out-of-the-box (essential for Baileys, date-fns, and i18n libraries).
 - 🚀 **Hardware-Accelerated Crypto**: Enabled OpenSSL hardware assembly optimizations on ARM64 for 2x–5x cryptographic and TLS performance.
 - 🔒 **Runtime Obfuscated Branding**: Embeds custom runtime branding banners on `node -v` using in-memory XOR decoding without leaking plaintext strings in compiled ELF binaries or headers.
-- ⚡ **Optimized Toolchain**: Android NDK **r29** (Clang 21), host build on Ubuntu 24.04, linker section GC (`-Wl,--gc-sections`), ThinLTO parallel acceleration, and persistent `ccache` object caching.
+- ⚡ **Optimized Toolchain**: Android NDK **r30** (2026 LTS), host build on Ubuntu 24.04 with ninja-build, linker section GC (`-Wl,--gc-sections`), ThinLTO/Fat-LTO acceleration, and persistent `ccache` caching.
 
 ---
 
 ## 📊 Architecture & Build Status
 
-| ABI | Architecture | Balanced Mode (JIT + -O3) | Speed Mode (ThinLTO) | Size Mode (V8 Lite) | Status |
-|:---|:---|:---:|:---:|:---:|:---:|
-| **arm64-v8a** | 64-bit ARM | ✅ Verified | ✅ Verified | ✅ Verified | Primary / Production |
-| **armeabi-v7a** | 32-bit ARM | ⚠️ Experimental | ⚠️ Experimental | ⚠️ Experimental | Community Supported |
+| ABI | Architecture | Balanced Mode (JIT + -O3) | Speed Mode (ThinLTO) | Fat LTO Mode (Full LTO) | Size Mode (V8 Lite) | Status |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| **arm64-v8a** | 64-bit ARM | ✅ Verified | ✅ Verified | ✅ Verified | ✅ Verified | Primary / Production |
+| **armeabi-v7a** | 32-bit ARM | ⚠️ Experimental | ⚠️ Experimental | ⚠️ Experimental | ⚠️ Experimental | Community Supported |
 
 > [!NOTE]
 > `armeabi-v7a` is community-supported and best-effort due to upstream V8 32-bit cross-compilation quirks ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975)). Build failures on 32-bit do not block 64-bit ARM releases.
@@ -105,7 +105,7 @@ Android is not an officially supported target platform by the Node.js core team 
    - **`release_channel`**: `stable` (official release tags) or `prerelease` (dev branches).
    - **`build_mode`**: `standalone` (CLI executable) or `shared` (`.so` library).
    - **`lib_name`**: Custom name prefix (e.g. `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).
-   - **`profile`**: `balanced`, `speed` (ThinLTO), or `size` (V8 Lite).
+   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full/Fat LTO), or `size` (V8 Lite).
 
 Every push to the `main` branch also triggers an automated build and attaches assets to a GitHub Release.
 

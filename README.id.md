@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=rilis%20terbaru)](https://github.com/Towartz/nodejs-arm/releases)
-[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r30%20(LTS)-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
@@ -33,16 +33,16 @@ Menghasilkan binary executable mandiri yang ter-link secara statis dengan libc++
 - 🌐 **Dukungan Intl Bawaan (small-icu)**: Disertai data ICU tertanam (`small-icu`), menghadirkan API JavaScript `Intl` standar secara langsung (sangat penting untuk Baileys, pemformatan tanggal/angka, dan library i18n).
 - 🚀 **Akselerasi Kripto Perangkat Keras**: Mengaktifkan optimasi OpenSSL assembly pada ARM64 untuk performa kriptografi & TLS 2x–5x lebih kencang.
 - 🔒 **Branding Terobfuskasi Runtime**: Menyisipkan teks branding kustom saat `node -v` menggunakan dekripsi XOR di memori tanpa meninggalkan teks plaintext pada binary ELF maupun berkas header.
-- ⚡ **Toolchain Mutakhir**: Android NDK **r29** (Clang 21), host build di Ubuntu 24.04, linker section GC (`-Wl,--gc-sections`), akselerasi paralel ThinLTO, dan cache `ccache` persisten.
+- ⚡ **Toolchain Mutakhir**: Android NDK **r30** (2026 LTS), host build di Ubuntu 24.04 dengan ninja-build, linker section GC (`-Wl,--gc-sections`), akselerasi paralel ThinLTO/Fat-LTO, dan cache `ccache` persisten.
 
 ---
 
 ## 📊 Arsitektur & Status Build
 
-| ABI | Arsitektur | Mode Balanced (JIT + -O3) | Mode Speed (ThinLTO) | Mode Size (V8 Lite) | Status |
-|:---|:---|:---:|:---:|:---:|:---:|
-| **arm64-v8a** | 64-bit ARM | ✅ Terverifikasi | ✅ Terverifikasi | ✅ Terverifikasi | Utama / Produksi |
-| **armeabi-v7a** | 32-bit ARM | ⚠️ Eksperimental | ⚠️ Eksperimental | ⚠️ Eksperimental | Dukungan Komunitas |
+| ABI | Arsitektur | Mode Balanced (JIT + -O3) | Mode Speed (ThinLTO) | Mode Fat LTO (Full LTO) | Mode Size (V8 Lite) | Status |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| **arm64-v8a** | 64-bit ARM | ✅ Terverifikasi | ✅ Terverifikasi | ✅ Terverifikasi | ✅ Terverifikasi | Utama / Produksi |
+| **armeabi-v7a** | 32-bit ARM | ⚠️ Eksperimental | ⚠️ Eksperimental | ⚠️ Eksperimental | ⚠️ Eksperimental | Dukungan Komunitas |
 
 > [!NOTE]
 > `armeabi-v7a` bersifat *best-effort* karena adanya isu cross-compilation V8 32-bit upstream ([nodejs/node#58975](https://github.com/nodejs/node/issues/58975)). Kegagalan pada 32-bit tidak akan membatalkan rilis 64-bit ARM.
@@ -105,7 +105,7 @@ Android bukan platform yang didukung secara resmi oleh tim inti Node.js ([nodejs
    - **`release_channel`**: `stable` (rilis resmi) atau `prerelease` (branch dev).
    - **`build_mode`**: `standalone` (aplikasi CLI) atau `shared` (library `.so`).
    - **`lib_name`**: Nama kustom library (contoh: `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).
-   - **`profile`**: `balanced`, `speed` (ThinLTO), atau `size` (V8 Lite).
+   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full/Fat LTO), atau `size` (V8 Lite).
 
 Setiap push ke branch `main` juga akan secara otomatis memicu proses build dan mengunggah hasilnya ke GitHub Release.
 
