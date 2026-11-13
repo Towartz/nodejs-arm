@@ -722,6 +722,13 @@ jobs:
           patch('node.gyp',
                 "      ['OS==\"linux\" and clang==1', {",
                 "      ['(OS==\"linux\" or OS==\"android\") and clang==1', {")
+          node_gyp = pathlib.Path('node.gyp')
+          if node_gyp.exists():
+              ng = node_gyp.read_text()
+              ng = ng.replace("['enable_lto==\"true\"', {\n          'ldflags': [ '-fno-lto' ],",
+                              "['enable_lto==\"true\"', {\n          'cflags': [ '-fno-lto' ],\n          'ldflags': [ '-fno-lto' ],")
+              node_gyp.write_text(ng)
+              print("patched node.gyp (cflags -fno-lto on LTO-disabled auxiliary targets)")
           patch('tools/v8_gypfiles/toolchain.gypi',
                 "    'v8_android_log_stdout%': 0,", "    'v8_android_log_stdout%': 1,")
           v8_tc = pathlib.Path('tools/v8_gypfiles/toolchain.gypi')
@@ -1484,7 +1491,7 @@ jobs:
               ;;
             fat-lto)
               EXTRA_FLAGS="--enable-lto"
-              export LDFLAGS="$LDFLAGS -Wl,-mllvm,-threads=2"
+              export LDFLAGS="$LDFLAGS -Wl,--lto-jobs=2"
               ;;
             size)
               EXTRA_FLAGS="--v8-lite-mode"
@@ -1570,9 +1577,9 @@ jobs:
           # configure.py detects host_arch=ia32 and v8.gyp selects
           # ia32/push_registers_asm.cc instead of the x64 version.
           if [ "${{ matrix.dest_cpu }}" = "arm" ]; then
-            make -j"$(nproc)" node CC.host="ccache gcc -m32" CXX.host="ccache g++ -m32" LINK.host="g++ -m32" AR.host=ar
+            make -C out -j"$(nproc)" BUILDTYPE=Release node CC.host="ccache gcc -m32" CXX.host="ccache g++ -m32" LINK.host="g++ -m32" AR.host=ar
           else
-            make -j"$(nproc)" node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
+            make -C out -j"$(nproc)" BUILDTYPE=Release node CC.host="ccache gcc" CXX.host="ccache g++" LINK.host="g++" AR.host=ar
           fi
 
           echo "---- ccache stats (${{ matrix.abi }}) ----"
