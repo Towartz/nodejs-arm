@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=最新发布)](https://github.com/Towartz/nodejs-arm/releases)
-[![NDK](https://img.shields.io/badge/NDK-r30%20(LTS)-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
@@ -33,7 +33,7 @@
 - 🌐 **内置标准 Intl 支持 (small-icu)**：集成内置 ICU 数据 (`small-icu`)，开箱即用支持完整 JavaScript `Intl` API（完美兼容 Baileys、日期时间格式化与国际化库）。
 - 🚀 **硬件加速密码学计算**：在 ARM64 上启用 OpenSSL 汇编指令集优化，加密及 TLS 处理速度提升 2x–5x。
 - 🔒 **运行时混淆版本标识**：在执行 `node -v` 时，通过内存中 XOR 解码显示自定义版本横幅，二进制 ELF 文件与头文件中零明文字符泄露。
-- ⚡ **现代化工具链**：Android NDK **r30** (2026 LTS)，Ubuntu 24.04 主机构建并集成 ninja-build，链接器分段回收 (`-Wl,--gc-sections`)，ThinLTO/Fat-LTO 并行加速，以及持久化 `ccache` 缓存。
+- ⚡ **现代化工具链**：Android NDK **r29** (Clang 21)，Ubuntu 24.04 主机构建并集成 ninja-build，链接器分段回收 (`-Wl,--gc-sections`)，ThinLTO/Fat-LTO 并行加速，以及持久化 `ccache` 缓存。
 
 ---
 

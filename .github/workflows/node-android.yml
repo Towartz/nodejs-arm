@@ -90,7 +90,7 @@ env:
   # r29 explicitly, and the `-Wl,-z,max-page-size=16384` linker flag (section
   # 4) already covers r28+'s 16 KB page-size default, so neither should need
   # further changes for this bump.
-  NDK_VERSION: 'r30'
+  NDK_VERSION: 'r29'
   MIN_API: '24'                # Node v24+ requires API 24+ (Android 7.0). Do NOT set below 24.
   ANDROID_PLATFORM: 'android-24'
 
@@ -1491,7 +1491,6 @@ jobs:
               ;;
             fat-lto)
               EXTRA_FLAGS="--enable-lto"
-              export LDFLAGS="$LDFLAGS -Wl,--lto-jobs=2"
               ;;
             size)
               EXTRA_FLAGS="--v8-lite-mode"

@@ -8,7 +8,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Towartz/nodejs-arm/node-android.yml?branch=main&label=CI&logo=github)](https://github.com/Towartz/nodejs-arm/actions)
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=rilis%20terbaru)](https://github.com/Towartz/nodejs-arm/releases)
-[![NDK](https://img.shields.io/badge/NDK-r30%20(LTS)-blue?logo=android)](https://developer.android.com/ndk)
+[![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
 [![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
@@ -33,7 +33,7 @@ Menghasilkan binary executable mandiri yang ter-link secara statis dengan libc++
 - 🌐 **Dukungan Intl Bawaan (small-icu)**: Disertai data ICU tertanam (`small-icu`), menghadirkan API JavaScript `Intl` standar secara langsung (sangat penting untuk Baileys, pemformatan tanggal/angka, dan library i18n).
 - 🚀 **Akselerasi Kripto Perangkat Keras**: Mengaktifkan optimasi OpenSSL assembly pada ARM64 untuk performa kriptografi & TLS 2x–5x lebih kencang.
 - 🔒 **Branding Terobfuskasi Runtime**: Menyisipkan teks branding kustom saat `node -v` menggunakan dekripsi XOR di memori tanpa meninggalkan teks plaintext pada binary ELF maupun berkas header.
-- ⚡ **Toolchain Mutakhir**: Android NDK **r30** (2026 LTS), host build di Ubuntu 24.04 dengan ninja-build, linker section GC (`-Wl,--gc-sections`), akselerasi paralel ThinLTO/Fat-LTO, dan cache `ccache` persisten.
+- ⚡ **Toolchain Mutakhir**: Android NDK **r29** (Clang 21), host build di Ubuntu 24.04 dengan ninja-build, linker section GC (`-Wl,--gc-sections`), akselerasi paralel ThinLTO/Fat-LTO, dan cache `ccache` persisten.
 
 ---
 
