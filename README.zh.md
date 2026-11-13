@@ -10,10 +10,10 @@
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=最新发布)](https://github.com/Towartz/nodejs-arm/releases)
 [![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
-[![Node](https://img.shields.io/badge/Node-v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 
-通过 GitHub Actions CI/CD 自动交叉编译 **Node.js** (v26.x, v24.x LTS) 适用于 **Android ARM64** (`arm64-v8a`) 与 **ARM32** (`armeabi-v7a`)。
+通过 GitHub Actions CI/CD 自动交叉编译 **Node.js** (v27.x, v26.x, v24.x LTS) 适用于 **Android ARM64** (`arm64-v8a`) 与 **ARM32** (`armeabi-v7a`)。
 
 生成完全静态链接 libc++ 的独立命令行程序或 `.so` 动态共享库，并包含用于编译 C/C++ 原生插件的完整 N-API 头文件。
 
@@ -29,7 +29,7 @@
   - **Shared**：动态共享库 (`libnode.so` 或 `lib<name>.so`)，便于通过 JNI / `System.loadLibrary()` 嵌入 Android 应用中。
 - 🏷️ **发布渠道选择 (Release Channel)**：
   - **Stable** (默认)：自动查询并克隆官方最新的正式稳定发布标签 (例如 `v26.7.0` 或 `v24.19.0`)。
-  - **Pre-release**：克隆活跃的开发分支 (`v26.x` / `v24.x`)。
+  - **Pre-release**：克隆活跃的开发分支 (`v27.x` / `v26.x` / `v24.x`)。
 - 🔒 **运行时混淆版本标识**：在执行 `node -v` 时，通过内存中 XOR 解码显示自定义版本横幅，二进制 ELF 文件与头文件中零明文字符泄露。
 - ⚡ **现代化工具链**：Android NDK **r29** (Clang 21)，Ubuntu 24.04 主机构建，ThinLTO 并行加速，以及持久化 `ccache` 缓存。
 
@@ -99,7 +99,7 @@ Android 并非 Node.js 官方核心团队正式支持的目标平台 ([nodejs/no
 1. 点击本仓库顶部的 **Actions** 标签页。
 2. 选择 **Node.js for Android (ARM)** 工作流。
 3. 点击 **Run workflow** 并选择所需参数：
-   - **`node_version`**：`v26.x` 或 `v24.x`。
+   - **`node_version`**：`v27.x`、`v26.x` 或 `v24.x`。
    - **`release_channel`**：`stable` (正式发布标签) 或 `prerelease` (开发分支)。
    - **`build_mode`**：`standalone` (CLI 可执行文件) 或 `shared` (`.so` 共享库)。
    - **`lib_name`**：自定义名称前缀 (例如 `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`)。

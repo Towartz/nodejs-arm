@@ -10,10 +10,10 @@
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=rilis%20terbaru)](https://github.com/Towartz/nodejs-arm/releases)
 [![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
-[![Node](https://img.shields.io/badge/Node-v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 
-Otomatisasi CI/CD GitHub Actions untuk kompilasi silang (*cross-compile*) **Node.js** (v26.x, v24.x LTS) untuk target **Android ARM64** (`arm64-v8a`) dan **ARM32** (`armeabi-v7a`).
+Otomatisasi CI/CD GitHub Actions untuk kompilasi silang (*cross-compile*) **Node.js** (v27.x, v26.x, v24.x LTS) untuk target **Android ARM64** (`arm64-v8a`) dan **ARM32** (`armeabi-v7a`).
 
 Menghasilkan binary executable mandiri yang ter-link secara statis dengan libc++, atau shared library (`.so`), lengkap dengan header N-API untuk membangun native addon C/C++.
 
@@ -29,7 +29,7 @@ Menghasilkan binary executable mandiri yang ter-link secara statis dengan libc++
   - **Shared**: Shared library (`libnode.so` atau `lib<name>.so`) untuk disematkan ke dalam aplikasi Android melalui JNI / `System.loadLibrary()`.
 - 🏷️ **Pilihan Saluran Rilis (Release Channel)**:
   - **Stable** (Default): Otomatis mendeteksi dan meng-clone tag rilis resmi stabil terbaru (misal `v26.7.0` atau `v24.19.0`).
-  - **Pre-release**: Meng-clone branch pengembangan aktif (`v26.x` / `v24.x`).
+  - **Pre-release**: Meng-clone branch pengembangan aktif (`v27.x` / `v26.x` / `v24.x`).
 - 🔒 **Branding Terobfuskasi Runtime**: Menyisipkan teks branding kustom saat `node -v` menggunakan dekripsi XOR di memori tanpa meninggalkan teks plaintext pada binary ELF maupun berkas header.
 - ⚡ **Toolchain Mutakhir**: Android NDK **r29** (Clang 21), host build di Ubuntu 24.04, akselerasi paralel ThinLTO, dan cache `ccache` persisten.
 
@@ -99,7 +99,7 @@ Android bukan platform yang didukung secara resmi oleh tim inti Node.js ([nodejs
 1. Buka tab **Actions** di repositori ini.
 2. Pilih workflow **Node.js for Android (ARM)**.
 3. Klik tombol **Run workflow** dan pilih parameter yang diinginkan:
-   - **`node_version`**: `v26.x` atau `v24.x`.
+   - **`node_version`**: `v27.x`, `v26.x`, atau `v24.x`.
    - **`release_channel`**: `stable` (rilis resmi) atau `prerelease` (branch dev).
    - **`build_mode`**: `standalone` (aplikasi CLI) atau `shared` (library `.so`).
    - **`lib_name`**: Nama kustom library (contoh: `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).

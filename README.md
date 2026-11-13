@@ -10,10 +10,10 @@
 [![Latest release](https://img.shields.io/github/v/release/Towartz/nodejs-arm?logo=github&label=latest%20release)](https://github.com/Towartz/nodejs-arm/releases)
 [![NDK](https://img.shields.io/badge/NDK-r29-blue?logo=android)](https://developer.android.com/ndk)
 [![API](https://img.shields.io/badge/API-24%2B-brightgreen?logo=android)](https://developer.android.com/guide/topics/manifest/uses-sdk-element)
-[![Node](https://img.shields.io/badge/Node-v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/Node-v27.x%20%7C%20v26.x%20%7C%20v24.x-339933?logo=nodedotjs)](https://nodejs.org)
 [![License](https://img.shields.io/github/license/Towartz/nodejs-arm)](LICENSE)
 
-Automated GitHub Actions CI/CD cross-compiling **Node.js** (v26.x, v24.x LTS) for **Android ARM64** (`arm64-v8a`) and **ARM32** (`armeabi-v7a`).
+Automated GitHub Actions CI/CD cross-compiling **Node.js** (v27.x, v26.x, v24.x LTS) for **Android ARM64** (`arm64-v8a`) and **ARM32** (`armeabi-v7a`).
 
 Produces standalone statically linked executable binaries or shared `.so` libraries with libc++ and complete N-API header headers for building native C/C++ addons.
 
@@ -29,7 +29,7 @@ Produces standalone statically linked executable binaries or shared `.so` librar
   - **Shared**: Shared library (`libnode.so` or `lib<name>.so`) for embedding into Android apps via JNI / `System.loadLibrary()`.
 - 🏷️ **Release Channels**:
   - **Stable** (Default): Automatically queries and builds the latest official release tag (e.g., `v26.7.0` or `v24.19.0`).
-  - **Pre-release**: Builds the active bleeding-edge development branch (`v26.x` / `v24.x`).
+  - **Pre-release**: Builds the active bleeding-edge development branch (`v27.x` / `v26.x` / `v24.x`).
 - 🔒 **Runtime Obfuscated Branding**: Embeds custom runtime branding banners on `node -v` using in-memory XOR decoding without leaking plaintext strings in compiled ELF binaries or headers.
 - ⚡ **Optimized Toolchain**: Android NDK **r29** (Clang 21), host build on Ubuntu 24.04, ThinLTO parallel acceleration, and persistent `ccache` object caching.
 
@@ -99,7 +99,7 @@ Android is not an officially supported target platform by the Node.js core team 
 1. Navigate to the **Actions** tab in this repository.
 2. Select the **Node.js for Android (ARM)** workflow.
 3. Click **Run workflow** and choose your desired parameters:
-   - **`node_version`**: `v26.x` or `v24.x`.
+   - **`node_version`**: `v27.x`, `v26.x`, or `v24.x`.
    - **`release_channel`**: `stable` (official release tags) or `prerelease` (dev branches).
    - **`build_mode`**: `standalone` (CLI executable) or `shared` (`.so` library).
    - **`lib_name`**: Custom name prefix (e.g. `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).

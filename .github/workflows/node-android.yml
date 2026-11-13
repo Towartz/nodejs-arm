@@ -13,6 +13,7 @@ on:
         type: choice
         default: 'v26.x'
         options:
+          - 'v27.x'       # Current / Development release line
           - 'v26.x'       # Latest release line
           - 'v24.x'       # LTS (Krypton)
       release_channel:
@@ -21,7 +22,7 @@ on:
         default: 'stable'
         options:
           - 'stable'      # Latest official release tag (e.g. v26.7.0)
-          - 'prerelease'  # Active development branch (v26.x with -pre)
+          - 'prerelease'  # Active development branch (e.g. v27.x / v26.x with -pre)
       build_mode:
         description: 'Build mode'
         type: choice
@@ -275,8 +276,8 @@ jobs:
       # ---------- 3a. Resolve actual Node.js version ----------
       # NODE_REF (from the node_version input, e.g. "v26.x") is just the git
       # ref that was asked for — the workflow_dispatch dropdown offers
-      # v26.x/v24.x, which are MOVING branches, not fixed tags (confirmed
-      # against nodejs/node: refs/heads/v26.x and refs/heads/v24.x both
+      # v27.x/v26.x/v24.x, which are MOVING branches, not fixed tags (confirmed
+      # against nodejs/node: refs/heads/v27.x, refs/heads/v26.x, and refs/heads/v24.x all
       # exist and advance as releases land on them). So NODE_REF alone
       # never tells you which actual Node.js version — 26.4.0? 26.5.1? —
       # ended up in this specific build; it's the same literal string
