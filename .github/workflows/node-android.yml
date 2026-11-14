@@ -208,6 +208,25 @@ jobs:
           print(f"Configured LIB_NAME:        {clean_name}")
           PYEOF
 
+      # ---------- 0b. Virtual memory & swap ----------
+      # Node.js and V8 whole-program LTO requires 16GB+ peak memory during the final link.
+      # Hosted runners have only 7 GB RAM; free disk space and allocate a 16 GB swapfile.
+      # Note: NEVER delete /usr/local/lib/android as nttld/setup-ndk installs the NDK there!
+      - name: Expand runner swap space & free disk
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          echo "Freeing unnecessary preinstalled packages..."
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          echo "Allocating 16 GB swap file..."
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "---- Virtual Memory Status ----"
+          free -h
+          df -h /
+
       # ---------- 1. Android NDK (r29) ----------
       # Switched from a manual curl+unzip to nttld/setup-ndk to match the
       # v24-only workflow this was diffed against. The manual download step
@@ -227,24 +246,6 @@ jobs:
           TC="${ANDROID_NDK_HOME:-$ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64"
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           echo "NDK OK: ${ANDROID_NDK_HOME:-$ANDROID_NDK}"
-
-      # ---------- 1a. Virtual memory & swap ----------
-      # Node.js and V8 whole-program LTO requires 16GB+ peak memory during the final link.
-      # Hosted runners have only 7 GB RAM; free disk space and allocate a 16 GB swapfile.
-      - name: Expand runner swap space & free disk
-        run: |
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile /swapfile || true
-          echo "Freeing unnecessary preinstalled packages..."
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-          echo "Allocating 16 GB swap file..."
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "---- Virtual Memory Status ----"
-          free -h
-          df -h /
 
       # ---------- 1b. ccache ----------
       # Everything above this point is seconds; the ~2h this job takes is almost
