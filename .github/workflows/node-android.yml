@@ -228,6 +228,24 @@ jobs:
           test -x "$TC/bin/${{ matrix.target }}${{ env.MIN_API }}-clang"
           echo "NDK OK: ${ANDROID_NDK_HOME:-$ANDROID_NDK}"
 
+      # ---------- 1a. Virtual memory & swap ----------
+      # Node.js and V8 whole-program LTO requires 16GB+ peak memory during the final link.
+      # Hosted runners have only 7 GB RAM; free disk space and allocate a 16 GB swapfile.
+      - name: Expand runner swap space & free disk
+        run: |
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          echo "Freeing unnecessary preinstalled packages..."
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          echo "Allocating 16 GB swap file..."
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "---- Virtual Memory Status ----"
+          free -h
+          df -h /
+
       # ---------- 1b. ccache ----------
       # Everything above this point is seconds; the ~2h this job takes is almost
       # entirely the make step in section 4 — a from-scratch V8+Node compile with
@@ -755,7 +773,7 @@ jobs:
                 "          }],", "")
           profile = os.environ.get('PROFILE_CHOICE', 'balanced')
           if profile == 'fat-lto':
-              lto_flag = ' -flto=full -ffat-lto-objects '
+              lto_flag = ' -flto=full '
           else:
               lto_flag = ' -flto=thin '
           patch('common.gypi',
@@ -1498,6 +1516,7 @@ jobs:
               ;;
             fat-lto)
               EXTRA_FLAGS="--enable-lto"
+              export LDFLAGS="$LDFLAGS -Wl,--lto-partitions=$(nproc)"
               ;;
             size)
               EXTRA_FLAGS="--v8-lite-mode"

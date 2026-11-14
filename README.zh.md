@@ -105,7 +105,7 @@ Android 并非 Node.js 官方核心团队正式支持的目标平台 ([nodejs/no
    - **`release_channel`**：`stable` (正式发布标签) 或 `prerelease` (开发分支)。
    - **`build_mode`**：`standalone` (CLI 可执行文件) 或 `shared` (`.so` 共享库)。
    - **`lib_name`**：自定义名称前缀 (例如 `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`)。
-   - **`profile`**：`balanced`、`speed` (ThinLTO)、`fat-lto` (完整 Fat LTO) 或 `size` (V8 Lite)。
+   - **`profile`**：`balanced`、`speed` (ThinLTO)、`fat-lto` (完整 Full LTO 并行分区) 或 `size` (V8 Lite)。
 
 任何推送到 `main` 分支的提交也会自动触发构建，并将成果上传至 GitHub Release。
 

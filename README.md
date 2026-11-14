@@ -105,7 +105,7 @@ Android is not an officially supported target platform by the Node.js core team 
    - **`release_channel`**: `stable` (official release tags) or `prerelease` (dev branches).
    - **`build_mode`**: `standalone` (CLI executable) or `shared` (`.so` library).
    - **`lib_name`**: Custom name prefix (e.g. `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).
-   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full/Fat LTO), or `size` (V8 Lite).
+   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full LTO with parallel partitions), or `size` (V8 Lite).
 
 Every push to the `main` branch also triggers an automated build and attaches assets to a GitHub Release.
 

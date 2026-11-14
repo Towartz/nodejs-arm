@@ -105,7 +105,7 @@ Android bukan platform yang didukung secara resmi oleh tim inti Node.js ([nodejs
    - **`release_channel`**: `stable` (rilis resmi) atau `prerelease` (branch dev).
    - **`build_mode`**: `standalone` (aplikasi CLI) atau `shared` (library `.so`).
    - **`lib_name`**: Nama kustom library (contoh: `node` $\rightarrow$ `libnode.so` / `node-android-*.zip`).
-   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full/Fat LTO), atau `size` (V8 Lite).
+   - **`profile`**: `balanced`, `speed` (ThinLTO), `fat-lto` (Full LTO dengan partisi paralel), atau `size` (V8 Lite).
 
 Setiap push ke branch `main` juga akan secara otomatis memicu proses build dan mengunggah hasilnya ke GitHub Release.
 
